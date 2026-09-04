@@ -1,20 +1,22 @@
 package com.pugplayz.facechanger
 
+import android.graphics.Color
 import kotlin.math.*
 
 /**
- * Tiny numeric expression evaluator used by the filter sandbox.
+ * Numeric expression evaluator for the sandboxed filter language.
  *
- * This intentionally has no reflection, host calls, dynamic code, files, network, Android APIs,
- * processes or allocation primitives exposed to scripts. Expressions are also bounded so a
- * pathological user expression cannot recurse forever or consume unlimited parser work.
+ * It intentionally exposes only pure math, tracking data, script variables and an optional
+ * read-only sampler for the current camera frame. There is no reflection, host invocation,
+ * filesystem, network, Android service, shell, native code or dynamic-code bridge.
  */
 class ExpressionEvaluator(
     private val source: String,
     private val vars: Map<String, String>,
     private val tracking: TrackingFrame,
     private val frameIndex: Long,
-    private val elapsedSeconds: Double
+    private val elapsedSeconds: Double,
+    private val samplePixel: ((Double, Double) -> Int)? = null
 ) {
     private var pos = 0
     private var steps = 0
@@ -34,34 +36,34 @@ class ExpressionEvaluator(
     }
 
     private fun parseAddSub(): Double {
-        var v = parseMulDiv()
+        var value = parseMulDiv()
         while (true) {
             tick()
             skipSpace()
-            v = when {
-                take('+') -> v + parseMulDiv()
-                take('-') -> v - parseMulDiv()
-                else -> return v
+            value = when {
+                take('+') -> value + parseMulDiv()
+                take('-') -> value - parseMulDiv()
+                else -> return value
             }
         }
     }
 
     private fun parseMulDiv(): Double {
-        var v = parsePower()
+        var value = parsePower()
         while (true) {
             tick()
             skipSpace()
-            v = when {
-                take('*') -> v * parsePower()
+            value = when {
+                take('*') -> value * parsePower()
                 take('/') -> {
-                    val d = parsePower()
-                    if (abs(d) < 1e-12) 0.0 else v / d
+                    val divisor = parsePower()
+                    if (abs(divisor) < 1e-12) 0.0 else value / divisor
                 }
                 take('%') -> {
-                    val d = parsePower()
-                    if (abs(d) < 1e-12) 0.0 else v % d
+                    val divisor = parsePower()
+                    if (abs(divisor) < 1e-12) 0.0 else value % divisor
                 }
-                else -> return v
+                else -> return value
             }
         }
     }
@@ -88,10 +90,10 @@ class ExpressionEvaluator(
         tick()
         skipSpace()
         if (take('(')) {
-            val v = nested { parseAddSub() }
+            val value = nested { parseAddSub() }
             skipSpace()
             require(take(')')) { "Missing ')'" }
-            return v
+            return value
         }
 
         if (pos < source.length && (source[pos].isDigit() || source[pos] == '.')) {
@@ -149,8 +151,8 @@ class ExpressionEvaluator(
 
     private fun variable(name: String): Double = when (name.lowercase()) {
         "pi" -> Math.PI
-        "e" -> Math.E
         "tau" -> Math.PI * 2.0
+        "e" -> Math.E
         "time" -> elapsedSeconds
         "frame" -> frameIndex.toDouble()
         "tracked" -> if (tracking.groups.isNotEmpty()) 1.0 else 0.0
@@ -158,142 +160,124 @@ class ExpressionEvaluator(
         else -> vars[name]?.toDoubleOrNull() ?: 0.0
     }
 
-    /**
-     * Whitelisted pure functions only. Adding a function here can expose math/tracking data, but
-     * must never call arbitrary classes or host services.
-     */
-    private fun call(name: String, a: List<Double>): Double = when (name.lowercase()) {
-        // Scientific math
-        "sin" -> sin(arg(a, 0))
-        "cos" -> cos(arg(a, 0))
-        "tan" -> tan(arg(a, 0))
-        "asin" -> asin(arg(a, 0).coerceIn(-1.0, 1.0))
-        "acos" -> acos(arg(a, 0).coerceIn(-1.0, 1.0))
-        "atan" -> atan(arg(a, 0))
-        "atan2" -> atan2(arg(a, 0), arg(a, 1))
-        "sqrt" -> sqrt(max(0.0, arg(a, 0)))
-        "cbrt" -> cbrt(arg(a, 0))
-        "abs" -> abs(arg(a, 0))
-        "floor" -> floor(arg(a, 0))
-        "ceil" -> ceil(arg(a, 0))
-        "round" -> round(arg(a, 0))
-        "sign" -> sign(arg(a, 0))
-        "min" -> if (a.isEmpty()) 0.0 else a.minOrNull() ?: 0.0
-        "max" -> if (a.isEmpty()) 0.0 else a.maxOrNull() ?: 0.0
-        "sum" -> a.sum()
-        "avg", "mean" -> if (a.isEmpty()) 0.0 else a.average()
-        "pow" -> arg(a, 0).pow(arg(a, 1))
-        "ln" -> ln(max(1e-12, arg(a, 0)))
-        "log10" -> log10(max(1e-12, arg(a, 0)))
-        "exp" -> exp(arg(a, 0).coerceIn(-60.0, 60.0))
-        "hypot" -> hypot(arg(a, 0), arg(a, 1))
-        "deg" -> Math.toDegrees(arg(a, 0))
-        "rad" -> Math.toRadians(arg(a, 0))
-        "clamp" -> arg(a, 0).coerceIn(min(arg(a, 1), arg(a, 2)), max(arg(a, 1), arg(a, 2)))
-        "saturate" -> arg(a, 0).coerceIn(0.0, 1.0)
-        "lerp" -> arg(a, 0) + (arg(a, 1) - arg(a, 0)) * arg(a, 2)
+    private fun call(name: String, args: List<Double>): Double = when (name.lowercase()) {
+        "sin" -> sin(arg(args, 0))
+        "cos" -> cos(arg(args, 0))
+        "tan" -> tan(arg(args, 0))
+        "asin" -> asin(arg(args, 0).coerceIn(-1.0, 1.0))
+        "acos" -> acos(arg(args, 0).coerceIn(-1.0, 1.0))
+        "atan" -> atan(arg(args, 0))
+        "atan2" -> atan2(arg(args, 0), arg(args, 1))
+        "sqrt" -> sqrt(max(0.0, arg(args, 0)))
+        "cbrt" -> cbrt(arg(args, 0))
+        "abs" -> abs(arg(args, 0))
+        "floor" -> floor(arg(args, 0))
+        "ceil" -> ceil(arg(args, 0))
+        "round" -> round(arg(args, 0))
+        "sign" -> sign(arg(args, 0))
+        "min" -> if (args.isEmpty()) 0.0 else args.minOrNull() ?: 0.0
+        "max" -> if (args.isEmpty()) 0.0 else args.maxOrNull() ?: 0.0
+        "sum" -> args.sum()
+        "avg", "mean" -> if (args.isEmpty()) 0.0 else args.average()
+        "pow" -> arg(args, 0).pow(arg(args, 1))
+        "ln" -> ln(max(1e-12, arg(args, 0)))
+        "log10" -> log10(max(1e-12, arg(args, 0)))
+        "exp" -> exp(arg(args, 0).coerceIn(-60.0, 60.0))
+        "hypot" -> hypot(arg(args, 0), arg(args, 1))
+        "deg" -> Math.toDegrees(arg(args, 0))
+        "rad" -> Math.toRadians(arg(args, 0))
+        "clamp" -> arg(args, 0).coerceIn(min(arg(args, 1), arg(args, 2)), max(arg(args, 1), arg(args, 2)))
+        "saturate" -> arg(args, 0).coerceIn(0.0, 1.0)
+        "lerp" -> arg(args, 0) + (arg(args, 1) - arg(args, 0)) * arg(args, 2)
         "inverse_lerp" -> {
-            val lo = arg(a, 0)
-            val hi = arg(a, 1)
-            val d = hi - lo
-            if (abs(d) < 1e-12) 0.0 else (arg(a, 2) - lo) / d
+            val lo = arg(args, 0); val hi = arg(args, 1); val span = hi - lo
+            if (abs(span) < 1e-12) 0.0 else (arg(args, 2) - lo) / span
         }
         "map" -> {
-            val inLo = arg(a, 1)
-            val inHi = arg(a, 2)
-            val d = inHi - inLo
-            val t = if (abs(d) < 1e-12) 0.0 else (arg(a, 0) - inLo) / d
-            arg(a, 3) + (arg(a, 4) - arg(a, 3)) * t
+            val value = arg(args, 0); val inLo = arg(args, 1); val inHi = arg(args, 2); val span = inHi - inLo
+            val t = if (abs(span) < 1e-12) 0.0 else (value - inLo) / span
+            arg(args, 3) + (arg(args, 4) - arg(args, 3)) * t
         }
         "smoothstep" -> {
-            val lo = arg(a, 0)
-            val hi = arg(a, 1)
-            val d = hi - lo
-            val t = if (abs(d) < 1e-12) 0.0 else ((arg(a, 2) - lo) / d).coerceIn(0.0, 1.0)
+            val lo = arg(args, 0); val hi = arg(args, 1); val span = hi - lo
+            val t = if (abs(span) < 1e-12) 0.0 else ((arg(args, 2) - lo) / span).coerceIn(0.0, 1.0)
             t * t * (3.0 - 2.0 * t)
         }
-        "step" -> if (arg(a, 1) < arg(a, 0)) 0.0 else 1.0
-        "fract" -> arg(a, 0) - floor(arg(a, 0))
+        "step" -> if (arg(args, 1) < arg(args, 0)) 0.0 else 1.0
+        "fract" -> arg(args, 0) - floor(arg(args, 0))
         "wrap" -> {
-            val lo = arg(a, 1)
-            val hi = arg(a, 2)
-            val span = hi - lo
-            if (abs(span) < 1e-12) lo else ((arg(a, 0) - lo) % span + span) % span + lo
+            val lo = arg(args, 1); val hi = arg(args, 2); val span = hi - lo
+            if (abs(span) < 1e-12) lo else ((arg(args, 0) - lo) % span + span) % span + lo
         }
-        "distance" -> hypot(arg(a, 2) - arg(a, 0), arg(a, 3) - arg(a, 1))
-        "angle" -> atan2(arg(a, 3) - arg(a, 1), arg(a, 2) - arg(a, 0))
-
-        // Safe boolean/comparison helpers. They return 1 or 0 and can be nested in `if`.
-        "eq" -> bool(abs(arg(a, 0) - arg(a, 1)) < 1e-9)
-        "ne" -> bool(abs(arg(a, 0) - arg(a, 1)) >= 1e-9)
-        "lt" -> bool(arg(a, 0) < arg(a, 1))
-        "lte" -> bool(arg(a, 0) <= arg(a, 1))
-        "gt" -> bool(arg(a, 0) > arg(a, 1))
-        "gte" -> bool(arg(a, 0) >= arg(a, 1))
-        "and" -> bool(a.all { truthy(it) })
-        "or" -> bool(a.any { truthy(it) })
-        "not" -> bool(!truthy(arg(a, 0)))
-        "select", "ifelse" -> if (truthy(arg(a, 0))) arg(a, 1) else arg(a, 2)
-
-        // Deterministic animation/noise: no system RNG or external entropy.
+        "distance" -> hypot(arg(args, 2) - arg(args, 0), arg(args, 3) - arg(args, 1))
+        "angle" -> atan2(arg(args, 3) - arg(args, 1), arg(args, 2) - arg(args, 0))
+        "eq" -> bool(abs(arg(args, 0) - arg(args, 1)) < 1e-9)
+        "ne" -> bool(abs(arg(args, 0) - arg(args, 1)) >= 1e-9)
+        "lt" -> bool(arg(args, 0) < arg(args, 1))
+        "lte" -> bool(arg(args, 0) <= arg(args, 1))
+        "gt" -> bool(arg(args, 0) > arg(args, 1))
+        "gte" -> bool(arg(args, 0) >= arg(args, 1))
+        "and" -> bool(args.all { truthy(it) })
+        "or" -> bool(args.any { truthy(it) })
+        "not" -> bool(!truthy(arg(args, 0)))
+        "select", "ifelse" -> if (truthy(arg(args, 0))) arg(args, 1) else arg(args, 2)
         "noise" -> {
-            val x = arg(a, 0) * 12.9898 + frameIndex * 0.071
+            val x = arg(args, 0) * 12.9898 + frameIndex * 0.071
             val n = sin(x) * 43758.5453
             n - floor(n)
         }
         "hash" -> {
-            val x = arg(a, 0) * 12.9898 + arg(a, 1) * 78.233 + arg(a, 2) * 37.719
+            val x = arg(args, 0) * 12.9898 + arg(args, 1) * 78.233 + arg(args, 2) * 37.719
             val n = sin(x) * 43758.5453
             n - floor(n)
         }
-
-        // Landmark access
-        "landmark_count" -> group(arg(a, 0))?.size?.toDouble() ?: 0.0
-        "landmark_x" -> point(arg(a, 0), arg(a, 1))?.x?.toDouble() ?: 0.0
-        "landmark_y" -> point(arg(a, 0), arg(a, 1))?.y?.toDouble() ?: 0.0
-        "landmark_z" -> point(arg(a, 0), arg(a, 1))?.z?.toDouble() ?: 0.0
-        "point_exists" -> bool(point(arg(a, 0), arg(a, 1)) != null)
+        "landmark_count" -> group(arg(args, 0))?.size?.toDouble() ?: 0.0
+        "landmark_x" -> point(arg(args, 0), arg(args, 1))?.x?.toDouble() ?: 0.0
+        "landmark_y" -> point(arg(args, 0), arg(args, 1))?.y?.toDouble() ?: 0.0
+        "landmark_z" -> point(arg(args, 0), arg(args, 1))?.z?.toDouble() ?: 0.0
+        "point_exists" -> bool(point(arg(args, 0), arg(args, 1)) != null)
         "landmark_distance" -> {
-            val p1 = point(arg(a, 0), arg(a, 1))
-            val p2 = point(arg(a, 0), arg(a, 2))
+            val p1 = point(arg(args, 0), arg(args, 1)); val p2 = point(arg(args, 0), arg(args, 2))
             if (p1 == null || p2 == null) 0.0 else hypot((p2.x - p1.x).toDouble(), (p2.y - p1.y).toDouble())
         }
         "landmark_mid_x" -> {
-            val p1 = point(arg(a, 0), arg(a, 1))
-            val p2 = point(arg(a, 0), arg(a, 2))
+            val p1 = point(arg(args, 0), arg(args, 1)); val p2 = point(arg(args, 0), arg(args, 2))
             if (p1 == null || p2 == null) 0.0 else (p1.x + p2.x) / 2.0
         }
         "landmark_mid_y" -> {
-            val p1 = point(arg(a, 0), arg(a, 1))
-            val p2 = point(arg(a, 0), arg(a, 2))
+            val p1 = point(arg(args, 0), arg(args, 1)); val p2 = point(arg(args, 0), arg(args, 2))
             if (p1 == null || p2 == null) 0.0 else (p1.y + p2.y) / 2.0
         }
-        "landmark_angle" -> landmarkAngle(arg(a, 0), arg(a, 1), arg(a, 2), arg(a, 3))
-
-        // Group geometry makes filters scale to the tracked face/hand/body instead of screen size.
-        "group_min_x" -> bounds(arg(a, 0))?.minX ?: 0.0
-        "group_max_x" -> bounds(arg(a, 0))?.maxX ?: 0.0
-        "group_min_y" -> bounds(arg(a, 0))?.minY ?: 0.0
-        "group_max_y" -> bounds(arg(a, 0))?.maxY ?: 0.0
-        "group_width" -> bounds(arg(a, 0))?.let { it.maxX - it.minX } ?: 0.0
-        "group_height" -> bounds(arg(a, 0))?.let { it.maxY - it.minY } ?: 0.0
-        "group_center_x" -> bounds(arg(a, 0))?.let { (it.minX + it.maxX) / 2.0 } ?: 0.0
-        "group_center_y" -> bounds(arg(a, 0))?.let { (it.minY + it.maxY) / 2.0 } ?: 0.0
-
+        "landmark_angle" -> landmarkAngle(arg(args, 0), arg(args, 1), arg(args, 2), arg(args, 3))
+        "group_min_x" -> bounds(arg(args, 0))?.minX ?: 0.0
+        "group_max_x" -> bounds(arg(args, 0))?.maxX ?: 0.0
+        "group_min_y" -> bounds(arg(args, 0))?.minY ?: 0.0
+        "group_max_y" -> bounds(arg(args, 0))?.maxY ?: 0.0
+        "group_width" -> bounds(arg(args, 0))?.let { it.maxX - it.minX } ?: 0.0
+        "group_height" -> bounds(arg(args, 0))?.let { it.maxY - it.minY } ?: 0.0
+        "group_center_x" -> bounds(arg(args, 0))?.let { (it.minX + it.maxX) / 2.0 } ?: 0.0
+        "group_center_y" -> bounds(arg(args, 0))?.let { (it.minY + it.maxY) / 2.0 } ?: 0.0
+        "sample_r" -> Color.red(sampleColor(arg(args, 0), arg(args, 1))) / 255.0
+        "sample_g" -> Color.green(sampleColor(arg(args, 0), arg(args, 1))) / 255.0
+        "sample_b" -> Color.blue(sampleColor(arg(args, 0), arg(args, 1))) / 255.0
+        "sample_a" -> Color.alpha(sampleColor(arg(args, 0), arg(args, 1))) / 255.0
+        "sample_luma" -> {
+            val c = sampleColor(arg(args, 0), arg(args, 1))
+            (Color.red(c) * 0.299 + Color.green(c) * 0.587 + Color.blue(c) * 0.114) / 255.0
+        }
         else -> error("Unknown function: $name")
     }
+
+    private fun sampleColor(x: Double, y: Double): Int =
+        samplePixel?.invoke(x.coerceIn(0.0, 1.0), y.coerceIn(0.0, 1.0)) ?: Color.TRANSPARENT
 
     private fun landmarkAngle(groupIndex: Double, aIndex: Double, bIndex: Double, cIndex: Double): Double {
         val pa = point(groupIndex, aIndex) ?: return 0.0
         val pb = point(groupIndex, bIndex) ?: return 0.0
         val pc = point(groupIndex, cIndex) ?: return 0.0
-        val ax = (pa.x - pb.x).toDouble()
-        val ay = (pa.y - pb.y).toDouble()
-        val cx = (pc.x - pb.x).toDouble()
-        val cy = (pc.y - pb.y).toDouble()
-        val dot = ax * cx + ay * cy
-        val cross = ax * cy - ay * cx
-        return abs(atan2(cross, dot))
+        val ax = (pa.x - pb.x).toDouble(); val ay = (pa.y - pb.y).toDouble()
+        val cx = (pc.x - pb.x).toDouble(); val cy = (pc.y - pb.y).toDouble()
+        return abs(atan2(ax * cy - ay * cx, ax * cx + ay * cy))
     }
 
     private data class Bounds(val minX: Double, val maxX: Double, val minY: Double, val maxY: Double)
@@ -301,60 +285,42 @@ class ExpressionEvaluator(
     private fun bounds(groupIndex: Double): Bounds? {
         val points = group(groupIndex) ?: return null
         if (points.isEmpty()) return null
-        var minX = Double.POSITIVE_INFINITY
-        var maxX = Double.NEGATIVE_INFINITY
-        var minY = Double.POSITIVE_INFINITY
-        var maxY = Double.NEGATIVE_INFINITY
-        points.forEach { point ->
-            minX = min(minX, point.x.toDouble())
-            maxX = max(maxX, point.x.toDouble())
-            minY = min(minY, point.y.toDouble())
-            maxY = max(maxY, point.y.toDouble())
-        }
-        return Bounds(minX, maxX, minY, maxY)
+        return Bounds(
+            points.minOf { it.x.toDouble() }, points.maxOf { it.x.toDouble() },
+            points.minOf { it.y.toDouble() }, points.maxOf { it.y.toDouble() }
+        )
     }
 
-    private fun arg(a: List<Double>, index: Int): Double = a.getOrElse(index) { 0.0 }
+    private fun arg(args: List<Double>, index: Int): Double = args.getOrElse(index) { 0.0 }
     private fun truthy(value: Double): Boolean = abs(value) > 1e-12
     private fun bool(value: Boolean): Double = if (value) 1.0 else 0.0
-
     private fun group(index: Double): List<Point3>? = tracking.groups.getOrNull(index.toInt())
-
     private fun point(group: Double, originalIndex: Double): Point3? =
         this.group(group)?.firstOrNull { it.index == originalIndex.toInt() }
 
     private fun take(c: Char): Boolean {
-        if (pos < source.length && source[pos] == c) {
-            pos++
-            return true
-        }
+        if (pos < source.length && source[pos] == c) { pos++; return true }
         return false
     }
 
-    private fun skipSpace() {
-        while (pos < source.length && source[pos].isWhitespace()) pos++
-    }
+    private fun skipSpace() { while (pos < source.length && source[pos].isWhitespace()) pos++ }
 
     private fun tick() {
         steps++
-        require(steps <= MAX_PARSE_STEPS) { "Expression is too complex" }
+        require(steps <= MAX_STEPS) { "Expression is too complex" }
     }
 
     private inline fun <T> nested(block: () -> T): T {
         depth++
-        require(depth <= MAX_NESTING) { "Expression nesting is too deep" }
-        return try {
-            block()
-        } finally {
-            depth--
-        }
+        require(depth <= MAX_DEPTH) { "Expression nesting is too deep" }
+        try { return block() } finally { depth-- }
     }
 
     companion object {
         private const val MAX_EXPRESSION_CHARS = 1024
-        private const val MAX_PARSE_STEPS = 4096
-        private const val MAX_NESTING = 64
-        private const val MAX_FUNCTION_ARGS = 16
         private const val MAX_IDENTIFIER_CHARS = 64
+        private const val MAX_FUNCTION_ARGS = 16
+        private const val MAX_STEPS = 4096
+        private const val MAX_DEPTH = 64
     }
 }
