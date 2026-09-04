@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id 'com.android.application'
     id 'org.jetbrains.kotlin.android'
@@ -5,6 +7,17 @@ plugins {
 }
 
 def ciVersionCode = providers.gradleProperty('ciVersionCode').getOrElse('1').toInteger()
+
+// Public/open-source release signing identity. Anyone cloning the repo can reproduce the same
+// signed release APK, which is intentional for this project.
+def signingPropertiesFile = rootProject.file('signing/signing.properties')
+def releaseKeystoreFile = rootProject.file('signing/release-key.jks')
+if (!signingPropertiesFile.exists() || !releaseKeystoreFile.exists()) {
+    throw new GradleException('Missing public release signing files under signing/')
+}
+
+def signingProperties = new Properties()
+signingPropertiesFile.withInputStream { signingProperties.load(it) }
 
 android {
     namespace 'com.pugplayz.facechanger'
@@ -18,11 +31,21 @@ android {
         versionName "1.0.${ciVersionCode}"
     }
 
+    signingConfigs {
+        release {
+            storeFile releaseKeystoreFile
+            storePassword signingProperties.getProperty('storePassword')
+            keyAlias signingProperties.getProperty('keyAlias')
+            keyPassword signingProperties.getProperty('keyPassword')
+        }
+    }
+
     buildFeatures { compose true }
 
     buildTypes {
         release {
             minifyEnabled false
+            signingConfig signingConfigs.release
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }

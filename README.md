@@ -10,6 +10,7 @@ An open-source Android MediaPipe camera-effect studio. It tracks **face, hands, 
 - Low / Medium / High detail for every tracking mode, with stable original MediaPipe landmark indices across LOD sampling.
 - Three built-in skeleton/mesh apps written in the same scripting language as custom filters. Their source is viewable in-app and can be saved as an editable copy.
 - Home screen with saved custom apps, delete controls, code editor, mode/detail controls and live app inputs.
+- **No login or sign-in screen**; the app opens directly into Filter Studio.
 - Sandboxed pixel/drawing operations: magnify, pixelate, tint, dots, proper landmark connections, circles, lines, rectangles and text.
 - `let` variables, `if` / `else`, bounded `repeat` loops, numeric/text inputs and comparisons.
 - Scientific expressions and animation values/functions including `time`, `frame`, trig, powers, roots, logs, interpolation and direct landmark coordinate functions.
@@ -20,13 +21,19 @@ An open-source Android MediaPipe camera-effect studio. It tracks **face, hands, 
 
 Requirements: JDK 17, Android SDK 35 and Gradle 8.9. The build automatically downloads the official MediaPipe `.task` model files into `app/src/main/assets` if they are missing. Those downloaded model files are ignored by Git.
 
-Run `gradle assembleDebug` or open the project in Android Studio.
+Run `gradle assembleRelease` or open the project in Android Studio and build the release variant.
+
+## Release signing
+
+This repository intentionally contains a reproducible public release signing identity under `signing/`. `release-key.jks` is the actual keystore file and `signing.properties` contains its alias/passwords. Gradle signs the `release` variant with that keystore.
+
+Because the signing identity is public, **anyone can sign an APK as this app**. That is intentional for this open-source project, but this identity should not be reused for a private or Play Store app.
+
+The current release certificate SHA-256 fingerprint is `90:A5:EB:40:EC:7D:B4:42:26:76:EC:1C:DB:6A:76:0C:FC:38:C0:AD:97:07:F2:7C:A9:6C:5A:54:6C:9A:FB:EA`.
 
 ## Automatic releases
 
-Every push to `main` runs `.github/workflows/release.yml`. It builds an installable debug-signed APK, uploads it as a workflow artifact, and creates a GitHub Release tagged `build-<run number>` containing `face-changer-custom-release.apk`. The project does not store a custom keystore, signing password, or signing secret. Android still requires APKs to carry a signature, so CI relies only on the build environment's automatic debug signing.
-
-Because there is no persistent signing identity, Android may require uninstalling an older CI build before installing a newer one.
+Every push to `main` runs `.github/workflows/release.yml`. It runs `assembleRelease`, uploads the signed release APK as a workflow artifact, and creates a GitHub Release tagged `build-<run number>` containing `face-changer-custom-release.apk`. CI also uses the run number as Android `versionCode`, so newer builds install as upgrades as long as they use this same repository signing identity.
 
 ## Scripting
 
