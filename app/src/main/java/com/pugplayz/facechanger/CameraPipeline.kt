@@ -134,6 +134,11 @@ fun FilterCameraView(
 
         val hasGlobalPixels = programHasGlobalPixels(program)
         val needsTracking = scriptNeedsTracking(code)
+        // Compile once when the filter is applied, before camera frames start arriving. Numeric
+        // pixel programs then execute from DoubleArray slots + stack bytecode instead of walking
+        // String maps and expression ASTs for every single pixel. Unsupported scripts stay on the
+        // compatibility interpreter automatically.
+        val compiledPixelProgram = if (program.usesPixels) compilePixelBytecode(program) else null
         val providerFuture = ProcessCameraProvider.getInstance(context)
 
         providerFuture.addListener({
@@ -204,11 +209,20 @@ fun FilterCameraView(
                         )
                     } else null
 
-                    // Some tracked local-pixel kernels are tiny on screen but huge for an
-                    // interpreter: every pixel runs several expressions, branches and channel sets.
-                    // Recognized kernels can render directly into a transparent overlay, avoiding
-                    // both the interpreter hot loop and the full-frame difference pass.
-                    val optimizedTrackedPixels = if (program.usesPixels && needsTracking) {
+                    // General compiled path for numeric pixel filters. This is not a one-off effect
+                    // recognizer: the script AST is lowered to reusable VM instructions and postfix
+                    // expression bytecode once when Apply is pressed.
+                    val bytecodePixels = if (compiledPixelProgram != null) {
+                        compiledPixelProgram.render(cameraBitmap, tracking, latestValues.get()).also {
+                            makeDifferenceOverlay(cameraBitmap, it)
+                        }
+                    } else null
+
+                    // Keep the old native micro-optimization as a fallback for scripts the generic
+                    // bytecode compiler deliberately declines (for example future unsupported ops).
+                    val optimizedTrackedPixels = if (
+                        bytecodePixels == null && program.usesPixels && needsTracking
+                    ) {
                         renderOptimizedTrackedPixelOverlay(
                             code = code,
                             mode = mode,
@@ -217,7 +231,7 @@ fun FilterCameraView(
                         )
                     } else null
 
-                    output = bundledOverlay ?: optimizedTrackedPixels ?: if (program.usesPixels) {
+                    output = bundledOverlay ?: bytecodePixels ?: optimizedTrackedPixels ?: if (program.usesPixels) {
                         engine.render(cameraBitmap, tracking, program, latestValues.get()).also {
                             makeDifferenceOverlay(cameraBitmap, it)
                         }
