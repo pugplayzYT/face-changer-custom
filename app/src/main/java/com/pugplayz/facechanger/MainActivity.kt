@@ -37,6 +37,8 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 private val Dark = Color(0xFF090D12)
 private val Surface = Color(0xFF121923)
@@ -159,14 +161,22 @@ private fun HomeScreen(
                                     if (app.builtIn) {
                                         Spacer(Modifier.width(8.dp))
                                         Surface(color = Blue.copy(.14f), shape = RoundedCornerShape(50)) {
-                                            Text("BUILT-IN", color = Blue, fontSize = 9.sp, modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp))
+                                            Text(
+                                                "BUILT-IN",
+                                                color = Blue,
+                                                fontSize = 9.sp,
+                                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                                            )
                                         }
                                     }
                                 }
                                 Text("${app.mode} • ${app.detail}", color = Color(0xFF8E9AA6), fontSize = 12.sp)
                             }
                             IconButton(onClick = { onEdit(app) }) {
-                                Icon(if (app.builtIn) Icons.Default.Code else Icons.Default.Edit, if (app.builtIn) "View source" else "Edit")
+                                Icon(
+                                    if (app.builtIn) Icons.Default.Code else Icons.Default.Edit,
+                                    if (app.builtIn) "View source" else "Edit"
+                                )
                             }
                         }
                         Spacer(Modifier.height(10.dp))
@@ -189,9 +199,12 @@ private fun EditorScreen(
     var name by remember(existing?.id) { mutableStateOf(existing?.name ?: "My Filter") }
     var desc by remember(existing?.id) { mutableStateOf(existing?.description ?: "Custom filter") }
     var mode by remember(existing?.id) { mutableStateOf(existing?.mode ?: TrackingMode.FACE) }
-    var detail by remember(existing?.id) { mutableStateOf(existing?.detail ?: DetailLevel.HIGH) }
+    var detail by remember(existing?.id) { mutableStateOf(existing?.detail ?: DetailLevel.MEDIUM) }
     var code by remember(existing?.id) {
-        mutableStateOf(existing?.code ?: "input number strength Eye_Size 1.8 0.5 3.0\nlet pulse = strength+sin(time*5)*0.12\nif point_exists(0,33) > 0\n  magnify 0 33 pulse 0.10\n  connections #47D7AC 2\nend")
+        mutableStateOf(
+            existing?.code
+                ?: "input number strength Eye_Size 1.8 0.5 3.0\nlet pulse = strength+sin(time*5)*0.12\nif point_exists(0,33) > 0\n  magnify 0 33 pulse 0.10\n  connections #47D7AC 2\nend"
+        )
     }
     var error by remember { mutableStateOf<String?>(null) }
     val engine = remember { ScriptEngine() }
@@ -253,12 +266,21 @@ private fun EditorScreen(
                     }
                 }
                 Spacer(Modifier.height(6.dp))
-                Text("Detail", fontWeight = FontWeight.Bold)
+                Text("Detail / performance", fontWeight = FontWeight.Bold)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     DetailLevel.entries.forEach { value ->
                         FilterChip(selected = detail == value, onClick = { detail = value }, label = { Text(value.name) })
                     }
                 }
+                Text(
+                    when (detail) {
+                        DetailLevel.LOW -> "360p analysis • fastest"
+                        DetailLevel.MEDIUM -> "540p analysis • balanced"
+                        DetailLevel.HIGH -> "720p analysis • most detail"
+                    },
+                    color = Color(0xFF8E9AA6),
+                    fontSize = 12.sp
+                )
             }
             item {
                 Text("Code", fontWeight = FontWeight.Bold)
@@ -324,7 +346,13 @@ private fun DocsScreen(onBack: () -> Unit) {
                         shape = RoundedCornerShape(10.dp),
                         modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
                     ) {
-                        Text(raw.removeSurrounding("`"), fontFamily = FontFamily.Monospace, color = Color(0xFFBFEBDD), fontSize = 13.sp, modifier = Modifier.padding(12.dp))
+                        Text(
+                            raw.removeSurrounding("`"),
+                            fontFamily = FontFamily.Monospace,
+                            color = Color(0xFFBFEBDD),
+                            fontSize = 13.sp,
+                            modifier = Modifier.padding(12.dp)
+                        )
                     }
                     raw.isBlank() -> Spacer(Modifier.height(5.dp))
                     else -> Text(raw, color = Color(0xFFD1DAE2), lineHeight = 20.sp)
@@ -352,6 +380,10 @@ private fun CameraScreen(app: FilterApp, onBack: () -> Unit) {
         mutableStateMapOf<String, String>().also { map -> program?.inputs?.forEach { map[it.name] = it.defaultValue } }
     }
 
+    DisposableEffect(Unit) {
+        onDispose { frame = null }
+    }
+
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         if (granted && program != null) {
             CameraFeed(front, app, engine, program, values) { frame = it }
@@ -360,7 +392,12 @@ private fun CameraScreen(app: FilterApp, onBack: () -> Unit) {
         }
 
         frame?.let {
-            androidx.compose.foundation.Image(it.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            androidx.compose.foundation.Image(
+                it.asImageBitmap(),
+                null,
+                Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop
+            )
         }
 
         Row(
@@ -370,7 +407,11 @@ private fun CameraScreen(app: FilterApp, onBack: () -> Unit) {
             IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, null) }
             Column(Modifier.weight(1f)) {
                 Text(app.name, fontWeight = FontWeight.Bold)
-                Text("${app.mode} • ${app.detail}", fontSize = 11.sp, color = Color.LightGray)
+                Text(
+                    "${app.mode} • ${app.detail} • ${when (app.detail) { DetailLevel.LOW -> "360p"; DetailLevel.MEDIUM -> "540p"; DetailLevel.HIGH -> "720p" }}",
+                    fontSize = 11.sp,
+                    color = Color.LightGray
+                )
             }
             IconButton(onClick = { front = !front }) { Icon(Icons.Default.Cameraswitch, "Switch camera") }
         }
@@ -393,7 +434,12 @@ private fun CameraScreen(app: FilterApp, onBack: () -> Unit) {
                                 valueRange = lo.toFloat()..hi.toFloat()
                             )
                         } else {
-                            OutlinedTextField(values[input.name] ?: "", { values[input.name] = it }, label = { Text(input.label) }, modifier = Modifier.fillMaxWidth())
+                            OutlinedTextField(
+                                values[input.name] ?: "",
+                                { values[input.name] = it },
+                                label = { Text(input.label) },
+                                modifier = Modifier.fillMaxWidth()
+                            )
                         }
                     }
                 }
@@ -414,63 +460,140 @@ private fun CameraFeed(
     val context = androidx.compose.ui.platform.LocalContext.current
     val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current
 
-    DisposableEffect(front, app.id) {
-        val executor = Executors.newSingleThreadExecutor()
+    DisposableEffect(front, app.id, app.detail) {
+        val worker = Executors.newSingleThreadExecutor()
         val mainExecutor = ContextCompat.getMainExecutor(context)
-        val tracker = TrackingEngine(context)
-        val future = ProcessCameraProvider.getInstance(context)
+        val tracker = TrackingEngine(context.applicationContext)
+        val active = AtomicBoolean(true)
+        val uiFramePending = AtomicBoolean(false)
+        var analysis: ImageAnalysis? = null
+        var provider: ProcessCameraProvider? = null
+        var lastProcessedAt = 0L
 
+        val targetSize = when (app.detail) {
+            DetailLevel.LOW -> android.util.Size(640, 360)
+            DetailLevel.MEDIUM -> android.util.Size(960, 540)
+            DetailLevel.HIGH -> android.util.Size(1280, 720)
+        }
+        val minFrameIntervalMs = when (app.detail) {
+            DetailLevel.LOW -> 66L      // ~15 fps, intentionally light
+            DetailLevel.MEDIUM -> 50L   // ~20 fps
+            DetailLevel.HIGH -> 40L     // ~25 fps
+        }
+
+        val future = ProcessCameraProvider.getInstance(context)
         future.addListener({
-            val provider = future.get()
-            val analysis = ImageAnalysis.Builder()
-                .setTargetResolution(android.util.Size(1280, 720))
+            if (!active.get()) return@addListener
+            val cameraProvider = runCatching { future.get() }.getOrNull() ?: return@addListener
+            provider = cameraProvider
+
+            val localAnalysis = ImageAnalysis.Builder()
+                .setTargetResolution(targetSize)
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build()
+            analysis = localAnalysis
 
-            analysis.setAnalyzer(executor) { proxy ->
+            localAnalysis.setAnalyzer(worker) { proxy ->
+                val now = android.os.SystemClock.elapsedRealtime()
+                if (!active.get() || now - lastProcessedAt < minFrameIntervalMs) {
+                    proxy.close()
+                    return@setAnalyzer
+                }
+                lastProcessedAt = now
+
+                var bitmap: Bitmap? = null
+                var rendered: Bitmap? = null
                 try {
-                    var bitmap = proxy.toBitmap()
+                    bitmap = proxy.toBitmap()
                     bitmap = rotateBitmap(bitmap, proxy.imageInfo.rotationDegrees, front)
                     val tracking = tracker.detect(bitmap, app.mode, app.detail)
-                    val rendered = engine.render(bitmap, tracking, program, values.toMap())
-                    mainExecutor.execute { onFrame(rendered) }
-                    if (rendered !== bitmap) bitmap.recycle()
+                    rendered = engine.render(bitmap, tracking, program, values.toMap())
+
+                    val frameToPost = rendered
+                    if (active.get() && uiFramePending.compareAndSet(false, true)) {
+                        mainExecutor.execute {
+                            try {
+                                if (active.get() && frameToPost != null && !frameToPost.isRecycled) {
+                                    onFrame(frameToPost)
+                                } else {
+                                    frameToPost?.recycle()
+                                }
+                            } finally {
+                                uiFramePending.set(false)
+                            }
+                        }
+                        rendered = null // ownership moved to UI state
+                    }
                 } catch (_: Throwable) {
-                    // Keep the stream alive if one frame or custom expression fails.
+                    // A bad frame or script must not kill the camera worker.
                 } finally {
+                    if (rendered != null && rendered !== bitmap && !rendered!!.isRecycled) rendered!!.recycle()
+                    if (bitmap != null && rendered !== bitmap && !bitmap!!.isRecycled) bitmap!!.recycle()
                     proxy.close()
                 }
             }
 
-            provider.unbindAll()
-            provider.bindToLifecycle(
-                lifecycle,
-                if (front) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA,
-                analysis
-            )
+            runCatching {
+                cameraProvider.unbindAll()
+                cameraProvider.bindToLifecycle(
+                    lifecycle,
+                    if (front) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA,
+                    localAnalysis
+                )
+            }
         }, mainExecutor)
 
         onDispose {
-            runCatching { future.get().unbindAll() }
-            tracker.close()
-            executor.shutdownNow()
+            active.set(false)
+            runCatching { analysis?.clearAnalyzer() }
+            runCatching { provider?.unbindAll() }
+            worker.shutdown()
+            runCatching { worker.awaitTermination(350, TimeUnit.MILLISECONDS) }
+            if (!worker.isTerminated) worker.shutdownNow()
+            // Close MediaPipe only after the analyzer is no longer allowed to call detect().
+            runCatching { tracker.close() }
         }
     }
 }
 
 private fun rotateBitmap(source: Bitmap, degrees: Int, mirror: Boolean): Bitmap {
+    if (degrees == 0 && !mirror) return source
     val matrix = Matrix()
     if (degrees != 0) matrix.postRotate(degrees.toFloat())
     if (mirror) matrix.postScale(-1f, 1f)
     val out = Bitmap.createBitmap(source, 0, 0, source.width, source.height, matrix, true)
-    if (out !== source) source.recycle()
+    if (out !== source && !source.isRecycled) source.recycle()
     return out
 }
 
 private fun builtIns() = listOf(
-    FilterApp("builtin-face", "Face Mesh", "High-detail face contour, eyes and lip connections. Open source to see the exact filter script.", TrackingMode.FACE, DetailLevel.HIGH, "connections #56A8FF 2\ndots #47D7AC 2", true),
-    FilterApp("builtin-hand", "Hand Skeleton", "Tracks up to two hands and draws the standard hand-bone connections.", TrackingMode.HAND, DetailLevel.HIGH, "connections #47D7AC 4\ndots #56A8FF 4", true),
-    FilterApp("builtin-body", "Body Skeleton", "Full-body pose landmarks with standard shoulder, limb and torso connections.", TrackingMode.BODY, DetailLevel.HIGH, "connections #56A8FF 4\ndots #47D7AC 4", true)
+    FilterApp(
+        "builtin-face",
+        "Face Mesh",
+        "Face contour, eyes and lip connections. Open source to see the exact filter script.",
+        TrackingMode.FACE,
+        DetailLevel.MEDIUM,
+        "connections #56A8FF 2\ndots #47D7AC 2",
+        true
+    ),
+    FilterApp(
+        "builtin-hand",
+        "Hand Skeleton",
+        "Tracks up to two hands and draws the standard hand-bone connections.",
+        TrackingMode.HAND,
+        DetailLevel.MEDIUM,
+        "connections #47D7AC 4\ndots #56A8FF 4",
+        true
+    ),
+    FilterApp(
+        "builtin-body",
+        "Body Skeleton",
+        "Full-body pose landmarks with standard shoulder, limb and torso connections.",
+        TrackingMode.BODY,
+        DetailLevel.MEDIUM,
+        "connections #56A8FF 4\ndots #47D7AC 4",
+        true
+    )
 )
 
 private fun saveApps(prefs: android.content.SharedPreferences, apps: List<FilterApp>) {
