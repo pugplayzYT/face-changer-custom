@@ -204,7 +204,20 @@ fun FilterCameraView(
                         )
                     } else null
 
-                    output = bundledOverlay ?: if (program.usesPixels) {
+                    // Some tracked local-pixel kernels are tiny on screen but huge for an
+                    // interpreter: every pixel runs several expressions, branches and channel sets.
+                    // Recognized kernels can render directly into a transparent overlay, avoiding
+                    // both the interpreter hot loop and the full-frame difference pass.
+                    val optimizedTrackedPixels = if (program.usesPixels && needsTracking) {
+                        renderOptimizedTrackedPixelOverlay(
+                            code = code,
+                            mode = mode,
+                            frame = tracking,
+                            source = cameraBitmap
+                        )
+                    } else null
+
+                    output = bundledOverlay ?: optimizedTrackedPixels ?: if (program.usesPixels) {
                         engine.render(cameraBitmap, tracking, program, latestValues.get()).also {
                             makeDifferenceOverlay(cameraBitmap, it)
                         }
