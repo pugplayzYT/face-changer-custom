@@ -1,20 +1,20 @@
 # Face Changer Custom scripting
 
-The language is now intentionally **small and general**. There are no premade visual-effect commands such as `invert`, `bulge`, `grayscale`, `pixelate`, `tint`, `circle`, `skeleton`, or `connections`.
+The app includes premade filters such as Face Mesh, Hand Skeleton and Body Skeleton, but **the programming language does not contain premade visual-effect commands**. Those premades are ordinary scripts built from the exact same primitives available to custom filters, and their source can be opened and forked.
 
-Instead, scripts build effects from a few safe primitives: variables, functions, conditions, bounded loops, pixel iteration, pixel writes, camera sampling, math, user inputs and MediaPipe landmarks.
+The language is deliberately small and general. There is no built-in `invert`, `grayscale`, `sepia`, `bulge`, `blur`, `pixelate`, `circle`, `line`, `skeleton`, or `connections` opcode. You build those effects yourself from functions, math, pixel access, camera sampling, drawing-by-pixel, and MediaPipe landmarks.
 
-Scripts still have **no file access, network access, shell, Android APIs, processes, reflection, arbitrary Kotlin/Java, native code, dynamic code loading, permissions, clipboard, contacts, microphone, package management or external storage access**.
+Scripts have no file access, network access, shell, Android APIs, processes, reflection, arbitrary Kotlin/Java, native code, dynamic code loading, permissions, clipboard, contacts, microphone, package management, or external-storage access.
 
 ## Inputs
 
-`input number amount Amount 1 0 1`
+`input number amount Invert 1 0 1`
 
 `input text caption Caption hello_world`
 
 Syntax: `input number|text NAME LABEL DEFAULT [MIN MAX]`.
 
-Inputs become controls on the camera screen and variables inside the script.
+Inputs become live controls on the camera screen and variables inside the script.
 
 ## Variables
 
@@ -30,31 +30,31 @@ Built-in numeric values:
 - `groups` — number of tracked faces/hands/bodies
 - `loop` — zero-based index inside `repeat`
 - `pi`, `tau`, `e` — constants
-- `image_width`, `image_height`, `aspect` — current analyzed frame geometry
+- `image_width`, `image_height`, `aspect` — analyzed-frame geometry
 
 ## User functions
 
-Functions are procedures made entirely from the same sandbox primitives.
+Functions are made from the same sandbox primitives as top-level code.
 
-`fn invert amount`
+`fn invert strength`
 
 `  pixels`
 
-`    set r lerp(r,1-r,amount)`
+`    set r lerp(r,1-r,strength)`
 
-`    set g lerp(g,1-g,amount)`
+`    set g lerp(g,1-g,strength)`
 
-`    set b lerp(b,1-b,amount)`
+`    set b lerp(b,1-b,strength)`
 
 `  end`
 
 `end`
 
-Call a function with:
+Call it with:
 
 `call invert 1`
 
-Function syntax:
+Syntax:
 
 `fn NAME [PARAM ...]`
 
@@ -64,7 +64,7 @@ Function syntax:
 
 `call NAME [ARG ...]`
 
-Functions may call other functions. Call depth is bounded by the sandbox.
+Function-call depth is bounded by the sandbox.
 
 ## If / else
 
@@ -90,9 +90,9 @@ Boolean helpers return 1 or 0: `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `and`, `or`
 
 `end`
 
-There is deliberately no unbounded `while` loop.
+There is no unbounded `while` loop.
 
-## Pixel loop
+## Full-frame pixel programs
 
 `pixels`
 
@@ -100,13 +100,15 @@ There is deliberately no unbounded `while` loop.
 
 `end`
 
-Inside a `pixels` block these variables exist:
+A script containing `pixels` is a **full-frame camera filter**. Its processed bitmap is placed over the native CameraX preview, so changes to `r`, `g`, `b`, and `a` affect the visible camera image itself rather than a transparent drawing layer.
 
-- `x`, `y` — normalized pixel coordinates from 0 to 1
+Inside `pixels`:
+
+- `x`, `y` — normalized coordinates from 0 to 1
 - `ix`, `iy` — integer pixel coordinates
-- `r`, `g`, `b`, `a` — current output channels from 0 to 1
+- `r`, `g`, `b`, `a` — current channels from 0 to 1
 
-Change the current pixel with only these essential writes:
+Change the current pixel with:
 
 `set r EXPRESSION`
 
@@ -118,17 +120,15 @@ Change the current pixel with only these essential writes:
 
 Channel values are clamped to 0..1.
 
-A pixel loop may optionally be restricted to a normalized rectangle:
+A pixel loop can be restricted to a normalized rectangle:
 
 `pixels X Y WIDTH HEIGHT`
 
-For example:
+Example:
 
 `pixels 0.25 0.25 0.5 0.5`
 
-This is important for fast local effects.
-
-Pixel loops cannot be nested.
+Pixel blocks cannot be nested.
 
 ## Source camera sampling
 
@@ -140,15 +140,13 @@ The source camera frame is read-only. Sample it at normalized coordinates with:
 - `sample_a(x,y)`
 - `sample_luma(x,y)`
 
-Coordinates are clamped to the frame and sampling is bilinear.
-
-This is enough to write custom warps, blur kernels, sharpen filters, edge detectors, chromatic effects and other image operations without adding dedicated effect commands to the engine.
+Coordinates are clamped and sampling is bilinear. These primitives are enough to write custom warps, blur kernels, sharpen filters, edge detectors, chromatic effects, and other image operations without adding named effects to the engine.
 
 ## Sparse pixel writing
 
 `write_pixel X Y R G B A`
 
-`write_pixel` writes one normalized output pixel. This is the low-level primitive for custom point/line/raster algorithms that do not need to scan the whole frame.
+This writes one normalized output pixel. Scripts without a `pixels` block render as a transparent overlay on the smooth native preview, which is ideal for meshes, skeletons, labels, particles, and custom raster drawing.
 
 Example:
 
@@ -162,7 +160,7 @@ Example:
 
 ## Tracking
 
-Each app selects Face, Hand or Body. Full MediaPipe landmarks are always exposed.
+Each filter selects Face, Hand or Body. Full MediaPipe landmark sets are exposed; there is no quality/LOD selector.
 
 - `landmark_count(group)`
 - `landmark_x(group,index)`
@@ -174,7 +172,7 @@ Each app selects Face, Hand or Body. Full MediaPipe landmarks are always exposed
 - `landmark_mid_y(group,a,b)`
 - `landmark_angle(group,a,b,c)`
 
-Tracked-object bounds:
+Tracked-object geometry:
 
 - `group_min_x(group)` / `group_max_x(group)`
 - `group_min_y(group)` / `group_max_y(group)`
@@ -193,9 +191,9 @@ Available helpers include:
 - geometry: `hypot`, `distance`, `angle`, `deg`, `rad`
 - deterministic animation: `noise`, `hash`
 
-## Example: invert written by the script
+## Example: invert
 
-There is no built-in invert opcode.
+There is no invert opcode. This is the entire effect:
 
 `input number amount Invert 1 0 1`
 
@@ -215,7 +213,7 @@ There is no built-in invert opcode.
 
 `call invert amount`
 
-## Example: grayscale written by the script
+## Example: grayscale
 
 `fn grayscale`
 
@@ -235,21 +233,15 @@ There is no built-in invert opcode.
 
 `call grayscale`
 
-## Example: custom eye bulge with no bulge opcode
+## Example: local eye warp
 
-This uses a local pixel region and source sampling. The effect itself is written in the script.
+This is a custom effect built from camera sampling rather than a built-in bulge command.
 
-`input number size Eye_Size 1.9 1 3`
+`input number size Eye_Size 1.8 1 3`
 
-`fn bulge cx cy radius scale`
+`fn warp cx cy radius scale`
 
-`  let left = cx-radius`
-
-`  let top = cy-radius`
-
-`  let diameter = radius*2`
-
-`  pixels left top diameter diameter`
+`  pixels cx-radius cy-radius radius*2 radius*2`
 
 `    let dx = x-cx`
 
@@ -259,21 +251,19 @@ This uses a local pixel region and source sampling. The effect itself is written
 
 `    if lt(d,radius)`
 
-`      let t = d/radius`
+`      let falloff = 1-d/radius`
 
-`      let localScale = 1+(scale-1)*(1-t)*(1-t)`
+`      let local = 1+(scale-1)*falloff*falloff`
 
-`      let sx = cx+dx/localScale`
+`      let sx = cx+dx/local`
 
-`      let sy = cy+dy/localScale`
+`      let sy = cy+dy/local`
 
 `      set r sample_r(sx,sy)`
 
 `      set g sample_g(sx,sy)`
 
 `      set b sample_b(sx,sy)`
-
-`      set a sample_a(sx,sy)`
 
 `    end`
 
@@ -287,38 +277,20 @@ This uses a local pixel region and source sampling. The effect itself is written
 
 `  let leftY = landmark_mid_y(0,159,145)`
 
-`  let rightX = landmark_mid_x(0,362,263)`
+`  let radius = group_width(0)*0.12`
 
-`  let rightY = landmark_mid_y(0,386,374)`
-
-`  let radius = group_width(0)*0.115`
-
-`  call bulge leftX leftY radius size`
-
-`  call bulge rightX rightY radius size`
+`  call warp leftX leftY radius size`
 
 `end`
 
-## Safety and resource limits
+## Sandbox and performance limits
 
-The sandbox is capability-based. Scripts only receive numbers, text inputs, time/frame values, MediaPipe landmarks, a read-only camera sampler and bounded output-pixel writes.
+The language is capability-based: scripts only receive numbers, text inputs, MediaPipe landmarks, time/frame values, a bounded output image, and a read-only camera sampler.
 
-Hard limits include:
+Loops, function depth, statement count, script size, expression complexity, per-frame operations, and per-frame pixel visits are bounded. CameraX uses `KEEP_ONLY_LATEST`, so expensive scripts drop old frames instead of building an ever-growing latency queue.
 
-- maximum script size
-- maximum statement count
-- maximum function count and parameters
-- maximum expression size, parser work and nesting
-- maximum function call depth
-- bounded `repeat`
-- no nested `pixels`
-- per-frame operation budget
-- per-frame pixel-visit budget
-- coordinates and color channels are clamped
-- CameraX uses `KEEP_ONLY_LATEST`, so expensive scripts drop analysis frames instead of building an endless queue
-
-The goal is broad visual programmability without giving user scripts capabilities outside the filter sandbox.
+Color-only pixel programs skip MediaPipe tracking when the script does not reference tracking data, reducing unnecessary work.
 
 ## Keeping docs current
 
-This file is the canonical scripting reference. The in-app Docs page reads this exact asset and Copy Docs copies the same text.
+This file is the canonical scripting reference. The in-app Docs screen reads this exact asset and Copy Docs copies this exact text.
