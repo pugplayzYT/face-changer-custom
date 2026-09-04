@@ -31,8 +31,13 @@ import java.util.concurrent.atomic.AtomicReference
 /**
  * Smooth native CameraX preview plus separately throttled MediaPipe/script analysis.
  *
- * Programs containing a `pixels` block are full-frame programs: their result is rendered as the
- * camera image itself. Sparse programs such as `write_pixel` remain transparent overlays.
+ * CameraX's ViewPort already crops ImageAnalysis to the same visible field of view as PreviewView.
+ * The effect layer therefore stretches that already-cropped bitmap to the host instead of applying
+ * a second CENTER_CROP, which previously made every processed filter look heavily zoomed in.
+ *
+ * Pixel programs are converted to a difference overlay: unchanged camera pixels become transparent
+ * so local face/hand/body effects preserve the full-resolution native preview everywhere they do
+ * not actually modify the image. Only genuinely changed pixels cover the preview.
  */
 @Composable
 fun FilterCameraView(
@@ -56,7 +61,9 @@ fun FilterCameraView(
     }
     val effectView = remember {
         ImageView(context).apply {
-            scaleType = ImageView.ScaleType.CENTER_CROP
+            // ImageAnalysis has already been cropped with PreviewView's ViewPort. CENTER_CROP here
+            // cropped it a second time and was the source of the giant apparent zoom.
+            scaleType = ImageView.ScaleType.FIT_XY
             setBackgroundColor(android.graphics.Color.TRANSPARENT)
         }
     }
@@ -130,7 +137,7 @@ fun FilterCameraView(
             }
         }
 
-        val needsFullFrame = program.usesPixels
+        val hasGlobalPixels = programHasGlobalPixels(program)
         val needsTracking = scriptNeedsTracking(code)
         val providerFuture = ProcessCameraProvider.getInstance(context)
 
@@ -158,10 +165,11 @@ fun FilterCameraView(
                     .build()
                     .also { it.setSurfaceProvider(previewView.surfaceProvider) }
 
-                // Full-frame scripts are interpreted pixel-by-pixel, so use a smaller analyzed frame
-                // while leaving the native CameraX preview full-resolution.
-                val analysisSize = if (needsFullFrame) {
-                    android.util.Size(320, 240)
+                // Local pixel effects only touch a small rectangle, so they can afford a proper
+                // 640x480 analysis frame. Truly full-frame interpreted filters use a compromise
+                // resolution to avoid turning the sandbox into a slideshow.
+                val analysisSize = if (hasGlobalPixels) {
+                    android.util.Size(480, 360)
                 } else {
                     android.util.Size(640, 480)
                 }
@@ -199,11 +207,13 @@ fun FilterCameraView(
                             TrackingFrame(mode, emptyList(), System.currentTimeMillis())
                         }
 
-                        output = if (needsFullFrame) {
+                        output = if (program.usesPixels) {
+                            // render() starts from an exact copy of the source camera frame. Convert
+                            // that result into a transparent difference layer so a local warp does
+                            // not replace the entire smooth/high-resolution preview with a low-res
+                            // analysis bitmap.
                             engine.render(cameraBitmap, tracking, program, latestValues.get()).also {
-                                // Camera frames are visually opaque. Keeping the result opaque stops
-                                // an odd source alpha channel from hiding a correct full-frame effect.
-                                it.setHasAlpha(false)
+                                makeDifferenceOverlay(cameraBitmap, it)
                             }
                         } else {
                             engine.renderOverlay(cameraBitmap, tracking, program, latestValues.get())
@@ -230,9 +240,6 @@ fun FilterCameraView(
                         }
                         clearError()
                     } catch (t: Throwable) {
-                        // Keep the native preview alive, but never hide why a filter failed. The old
-                        // code swallowed every exception here, which made a broken script/model look
-                        // exactly like a successfully applied filter that simply did nothing.
                         showError("Filter runtime error", t)
                     } finally {
                         output?.let { if (!it.isRecycled) it.recycle() }
@@ -278,6 +285,44 @@ fun FilterCameraView(
             displayed = null
         }
     }
+}
+
+private fun programHasGlobalPixels(program: ScriptEngine.Program): Boolean =
+    containsGlobalPixels(program.statements) || program.functions.values.any { containsGlobalPixels(it.body) }
+
+private fun containsGlobalPixels(statements: List<ScriptEngine.Statement>): Boolean = statements.any { statement ->
+    when (statement) {
+        is ScriptEngine.Pixels -> statement.x == null
+        is ScriptEngine.Repeat -> containsGlobalPixels(statement.body)
+        is ScriptEngine.If -> containsGlobalPixels(statement.yes) || containsGlobalPixels(statement.no)
+        else -> false
+    }
+}
+
+/**
+ * Turn a fully rendered frame into an overlay by making pixels that are byte-for-byte identical to
+ * the source transparent. Local pixel filters therefore only cover the part they actually changed.
+ */
+private fun makeDifferenceOverlay(source: Bitmap, rendered: Bitmap) {
+    require(source.width == rendered.width && source.height == rendered.height) {
+        "Rendered filter size does not match camera frame"
+    }
+    val width = source.width
+    val height = source.height
+    val count = width * height
+    val sourcePixels = IntArray(count)
+    val renderedPixels = IntArray(count)
+    source.getPixels(sourcePixels, 0, width, 0, 0, width, height)
+    rendered.getPixels(renderedPixels, 0, width, 0, 0, width, height)
+
+    for (index in 0 until count) {
+        if (renderedPixels[index] == sourcePixels[index]) {
+            renderedPixels[index] = android.graphics.Color.TRANSPARENT
+        }
+    }
+
+    rendered.setHasAlpha(true)
+    rendered.setPixels(renderedPixels, 0, width, 0, 0, width, height)
 }
 
 private fun scriptNeedsTracking(code: String): Boolean = Regex(
