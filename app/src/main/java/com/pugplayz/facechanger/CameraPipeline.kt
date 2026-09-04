@@ -1,15 +1,24 @@
+@file:OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
+
 package com.pugplayz.facechanger
 
 import android.graphics.Bitmap
 import android.graphics.Matrix
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CaptureRequest
 import android.util.Log
+import android.util.Range
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.TextView
+import androidx.camera.camera2.interop.Camera2CameraControl
+import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.CaptureRequestOptions
 import androidx.camera.core.AspectRatio
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
@@ -27,6 +36,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import kotlin.math.abs
 
 /**
  * Native CameraX preview plus a separately analyzed effect layer.
@@ -36,8 +46,9 @@ import java.util.concurrent.atomic.AtomicReference
  * coordinate system: the upright, optionally mirrored analysis bitmap.
  *
  * Performance is FPS-only: LOW=15, MEDIUM=30 and MAX=60. The setting never changes model quality,
- * landmark count or script semantics. Tracking runs on its own worker so a slow MediaPipe inference
- * cannot block the render/analyzer worker and turn the overlay into a slideshow.
+ * landmark count, smoothing, resolution or script semantics. Tracking runs on its own worker so a
+ * slow MediaPipe inference cannot block the render/analyzer worker and turn the overlay into a
+ * slideshow.
  */
 @Composable
 fun FilterCameraView(
@@ -186,11 +197,9 @@ fun FilterCameraView(
             provider = cameraProvider
 
             val rotation = previewView.display?.rotation ?: android.view.Surface.ROTATION_0
-            val sourceFps = android.util.Range(60, 60)
             val preview = Preview.Builder()
                 .setTargetRotation(rotation)
                 .setTargetAspectRatio(AspectRatio.RATIO_4_3)
-                .setTargetFrameRate(sourceFps)
                 .build()
                 .also { it.setSurfaceProvider(previewView.surfaceProvider) }
 
@@ -203,7 +212,6 @@ fun FilterCameraView(
             val localAnalysis = ImageAnalysis.Builder()
                 .setTargetRotation(rotation)
                 .setTargetResolution(analysisSize)
-                .setTargetFrameRate(sourceFps)
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build()
@@ -215,8 +223,8 @@ fun FilterCameraView(
                     return@setAnalyzer
                 }
 
-                // The performance control changes only this deadline. Resolution, model and
-                // landmark count stay identical at LOW, MEDIUM and MAX.
+                // The performance control changes only this deadline. Resolution, model, landmark
+                // count and all visual semantics stay identical at LOW, MEDIUM and MAX.
                 if (!framePacer.shouldProcess(System.nanoTime())) {
                     proxy.close()
                     return@setAnalyzer
@@ -254,7 +262,7 @@ fun FilterCameraView(
                         smoothTrackingFrame(
                             previous = smoothedTracking,
                             target = newest,
-                            alpha = framePacer.level.smoothingAlpha
+                            alpha = TRACKING_SMOOTHING_ALPHA
                         ).also { smoothedTracking = it }
                     } else {
                         TrackingFrame(mode, emptyList(), System.currentTimeMillis())
@@ -327,12 +335,17 @@ fun FilterCameraView(
 
             try {
                 cameraProvider.unbindAll()
-                cameraProvider.bindToLifecycle(
+                val camera = cameraProvider.bindToLifecycle(
                     lifecycle,
                     if (front) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA,
                     preview,
                     localAnalysis
                 )
+                // CameraX 1.4 does not expose setTargetFrameRate on Preview/ImageAnalysis builders.
+                // Ask Camera2 for the best advertised range that can reach 60 instead. If the camera
+                // cannot advertise 60, it falls back to its highest supported range while MAX stays
+                // a 60-FPS engine target.
+                requestBestSourceFps(camera, 60)
                 clearError()
             } catch (t: Throwable) {
                 showError("Camera bind failed", t)
@@ -364,6 +377,37 @@ fun FilterCameraView(
 
 private fun performanceText(level: FilterPerformance): String =
     "${level.label} • ${level.targetFps} FPS"
+
+/** Ask Camera2 for a real advertised source range rather than inventing an unsupported FPS range. */
+private fun requestBestSourceFps(camera: Camera, desiredFps: Int) {
+    runCatching {
+        val camera2Info = Camera2CameraInfo.from(camera.cameraInfo)
+        val supported = camera2Info.getCameraCharacteristic(
+            CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES
+        )?.toList().orEmpty()
+        if (supported.isEmpty()) return
+
+        val chosen: Range<Int> = supported
+            .filter { it.upper >= desiredFps }
+            .minWithOrNull(
+                compareBy<Range<Int>>(
+                    { abs(it.upper - desiredFps) },
+                    { abs(it.lower - desiredFps) },
+                    { it.upper - it.lower }
+                )
+            )
+            ?: supported.maxWithOrNull(
+                compareBy<Range<Int>>({ it.upper }, { it.lower })
+            )
+            ?: return
+
+        val options = CaptureRequestOptions.Builder()
+            .setCaptureRequestOption(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, chosen)
+            .build()
+        Camera2CameraControl.from(camera.cameraControl).setCaptureRequestOptions(options)
+        Log.i(TAG, "Camera source FPS request: $chosen (engine target $desiredFps FPS)")
+    }.onFailure { Log.w(TAG, "Could not request camera source FPS", it) }
+}
 
 /**
  * Interpolate the latest tracking result at render cadence. MediaPipe may complete less often than
@@ -493,4 +537,5 @@ private fun proxyToDisplayBitmap(proxy: androidx.camera.core.ImageProxy, mirror:
     }
 }
 
+private const val TRACKING_SMOOTHING_ALPHA = 0.55f
 private const val TAG = "FaceChangerCamera"
