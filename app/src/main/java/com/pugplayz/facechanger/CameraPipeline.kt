@@ -25,11 +25,11 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Smooth preview + separately throttled analysis.
+ * Smooth native CameraX preview plus separately throttled MediaPipe/script analysis.
  *
- * Preview and analysis are bound in one UseCaseGroup with PreviewView's ViewPort, then the
- * ImageProxy cropRect is applied before MediaPipe sees the frame. Normal drawing and local lens
- * effects are rendered as a transparent overlay, so they never replace/zoom the native preview.
+ * Programs containing a `pixels` block intentionally replace the analyzed frame because they can
+ * rewrite every pixel. Programs that only use sparse primitives such as `write_pixel` render as a
+ * transparent overlay, so the native preview remains smooth.
  */
 @Composable
 fun FilterCameraView(
@@ -82,9 +82,7 @@ fun FilterCameraView(
         var analysis: ImageAnalysis? = null
         var displayed: Bitmap? = null
 
-        // Pixelate intentionally replaces the whole frame. Everything else, including magnify and
-        // bulge, can be drawn as a transparent overlay on top of the smooth CameraX preview.
-        val needsFullFrame = scriptNeedsFullFrame(code)
+        val needsFullFrame = program.usesPixels
         val providerFuture = ProcessCameraProvider.getInstance(context)
 
         providerFuture.addListener({
@@ -192,9 +190,6 @@ fun FilterCameraView(
         }
     }
 }
-
-private fun scriptNeedsFullFrame(code: String): Boolean =
-    Regex("(?im)^\\s*pixelate\\b").containsMatchIn(code)
 
 /** Apply CameraX's shared ViewPort crop before rotation/mirroring. */
 private fun proxyToVisibleBitmap(proxy: androidx.camera.core.ImageProxy, mirror: Boolean): Bitmap {
