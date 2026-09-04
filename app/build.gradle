@@ -56,6 +56,12 @@ android {
     }
     kotlinOptions { jvmTarget = '17' }
 
+    // MediaPipe task files are memory-mapped/read from assets by the native task runtime on some
+    // devices. Package them uncompressed so model loading is reliable across Android versions/OEMs.
+    androidResources {
+        noCompress += ['task']
+    }
+
     packaging {
         resources.excludes += '/META-INF/{AL2.0,LGPL2.1}'
     }

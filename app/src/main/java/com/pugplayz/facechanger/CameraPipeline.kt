@@ -2,9 +2,13 @@ package com.pugplayz.facechanger
 
 import android.graphics.Bitmap
 import android.graphics.Matrix
+import android.util.Log
+import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.ImageView
+import android.widget.TextView
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
@@ -56,6 +60,15 @@ fun FilterCameraView(
             setBackgroundColor(android.graphics.Color.TRANSPARENT)
         }
     }
+    val statusView = remember {
+        TextView(context).apply {
+            setTextColor(android.graphics.Color.WHITE)
+            setBackgroundColor(android.graphics.Color.argb(225, 125, 28, 28))
+            textSize = 12f
+            setPadding(24, 14, 24, 14)
+            visibility = View.GONE
+        }
+    }
     val host = remember {
         FrameLayout(context).apply {
             addView(
@@ -65,6 +78,18 @@ fun FilterCameraView(
             addView(
                 effectView,
                 FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            )
+            addView(
+                statusView,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    Gravity.TOP
+                ).apply {
+                    topMargin = (64 * resources.displayMetrics.density).toInt()
+                    marginStart = (12 * resources.displayMetrics.density).toInt()
+                    marginEnd = (12 * resources.displayMetrics.density).toInt()
+                }
             )
         }
     }
@@ -77,9 +102,33 @@ fun FilterCameraView(
         val tracker = TrackingEngine(context.applicationContext)
         val active = AtomicBoolean(true)
         val uiFramePending = AtomicBoolean(false)
+        val lastError = AtomicReference<String?>(null)
         var provider: ProcessCameraProvider? = null
         var analysis: ImageAnalysis? = null
         var displayed: Bitmap? = null
+
+        fun showError(prefix: String, throwable: Throwable) {
+            val detail = throwableDetails(throwable)
+            val message = "$prefix: $detail"
+            if (lastError.getAndSet(message) == message) return
+            Log.e(TAG, message, throwable)
+            mainExecutor.execute {
+                if (active.get()) {
+                    statusView.text = message
+                    statusView.visibility = View.VISIBLE
+                }
+            }
+        }
+
+        fun clearError() {
+            if (lastError.getAndSet(null) == null) return
+            mainExecutor.execute {
+                if (active.get()) {
+                    statusView.text = ""
+                    statusView.visibility = View.GONE
+                }
+            }
+        }
 
         val needsFullFrame = program.usesPixels
         val needsTracking = scriptNeedsTracking(code)
@@ -87,7 +136,12 @@ fun FilterCameraView(
 
         providerFuture.addListener({
             if (!active.get()) return@addListener
-            val cameraProvider = runCatching { providerFuture.get() }.getOrNull() ?: return@addListener
+            val cameraProvider = try {
+                providerFuture.get()
+            } catch (t: Throwable) {
+                showError("Camera provider failed", t)
+                return@addListener
+            }
             provider = cameraProvider
 
             fun bindWhenReady() {
@@ -104,9 +158,8 @@ fun FilterCameraView(
                     .build()
                     .also { it.setSurfaceProvider(previewView.surfaceProvider) }
 
-                // The interpreter is intentionally general, not a hard-coded shader list. A lower
-                // analysis size for full-frame pixel programs keeps arbitrary user pixel code
-                // responsive while the native preview stays full resolution for overlay scripts.
+                // Full-frame scripts are interpreted pixel-by-pixel, so use a smaller analyzed frame
+                // while leaving the native CameraX preview full-resolution.
                 val analysisSize = if (needsFullFrame) {
                     android.util.Size(320, 240)
                 } else {
@@ -132,7 +185,14 @@ fun FilterCameraView(
                     try {
                         cameraBitmap = proxyToVisibleBitmap(proxy, front)
                         val tracking = if (needsTracking) {
-                            tracker.detect(cameraBitmap, mode)
+                            try {
+                                tracker.detect(cameraBitmap, mode)
+                            } catch (t: Throwable) {
+                                throw IllegalStateException(
+                                    "MediaPipe ${mode.name.lowercase()} tracking could not run",
+                                    t
+                                )
+                            }
                         } else {
                             // Color-only filters such as a user-written invert do not need to pay
                             // the MediaPipe cost every frame.
@@ -141,9 +201,8 @@ fun FilterCameraView(
 
                         output = if (needsFullFrame) {
                             engine.render(cameraBitmap, tracking, program, latestValues.get()).also {
-                                // Camera RGBA buffers are visually opaque. Force that contract at
-                                // display time so an odd producer alpha channel can never make a
-                                // correct full-frame pixel filter appear to do nothing.
+                                // Camera frames are visually opaque. Keeping the result opaque stops
+                                // an odd source alpha channel from hiding a correct full-frame effect.
                                 it.setHasAlpha(false)
                             }
                         } else {
@@ -157,6 +216,7 @@ fun FilterCameraView(
                                     if (active.get() && !frameToPost.isRecycled) {
                                         val old = displayed
                                         effectView.setImageBitmap(frameToPost)
+                                        effectView.visibility = View.VISIBLE
                                         displayed = frameToPost
                                         if (old != null && old !== frameToPost && !old.isRecycled) old.recycle()
                                     } else if (!frameToPost.isRecycled) {
@@ -168,8 +228,12 @@ fun FilterCameraView(
                             }
                             output = null
                         }
-                    } catch (_: Throwable) {
-                        // Bad frames and bad user scripts are isolated to one analyzer iteration.
+                        clearError()
+                    } catch (t: Throwable) {
+                        // Keep the native preview alive, but never hide why a filter failed. The old
+                        // code swallowed every exception here, which made a broken script/model look
+                        // exactly like a successfully applied filter that simply did nothing.
+                        showError("Filter runtime error", t)
                     } finally {
                         output?.let { if (!it.isRecycled) it.recycle() }
                         cameraBitmap?.let { if (!it.isRecycled) it.recycle() }
@@ -183,13 +247,16 @@ fun FilterCameraView(
                     .addUseCase(localAnalysis)
                     .build()
 
-                runCatching {
+                try {
                     cameraProvider.unbindAll()
                     cameraProvider.bindToLifecycle(
                         lifecycle,
                         if (front) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA,
                         group
                     )
+                    clearError()
+                } catch (t: Throwable) {
+                    showError("Camera bind failed", t)
                 }
             }
 
@@ -205,6 +272,8 @@ fun FilterCameraView(
             if (!worker.isTerminated) worker.shutdownNow()
             runCatching { tracker.close() }
             effectView.setImageDrawable(null)
+            statusView.text = ""
+            statusView.visibility = View.GONE
             displayed?.let { if (!it.isRecycled) it.recycle() }
             displayed = null
         }
@@ -214,6 +283,17 @@ fun FilterCameraView(
 private fun scriptNeedsTracking(code: String): Boolean = Regex(
     "(?i)\\b(tracked|groups|landmark_[A-Za-z0-9_]*|point_exists|group_[A-Za-z0-9_]*)\\b"
 ).containsMatchIn(code)
+
+private fun throwableDetails(throwable: Throwable): String {
+    val chain = generateSequence(throwable) { it.cause }.toList()
+    val useful = chain.asReversed().firstOrNull { !it.message.isNullOrBlank() } ?: throwable
+    val detail = useful.message?.trim().orEmpty()
+    return if (detail.isNotEmpty()) {
+        detail.take(220)
+    } else {
+        useful::class.java.simpleName.ifBlank { "Unknown error" }
+    }
+}
 
 /** Apply CameraX's shared ViewPort crop before rotation/mirroring. */
 private fun proxyToVisibleBitmap(proxy: androidx.camera.core.ImageProxy, mirror: Boolean): Bitmap {
@@ -240,3 +320,5 @@ private fun rotateCameraBitmap(source: Bitmap, degrees: Int, mirror: Boolean): B
     if (out !== source && !source.isRecycled) source.recycle()
     return out
 }
+
+private const val TAG = "FaceChangerCamera"
