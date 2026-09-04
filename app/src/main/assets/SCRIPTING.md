@@ -1,209 +1,285 @@
 # Face Changer Custom scripting
 
-Face Changer Custom uses a deliberately sandboxed filter language. The goal is **very high freedom inside the camera/filter world without giving scripts access to the phone itself**.
+The language is now intentionally **small and general**. There are no premade visual-effect commands such as `invert`, `bulge`, `grayscale`, `pixelate`, `tint`, `circle`, `skeleton`, or `connections`.
 
-Scripts can combine tracking, math, animation, conditions, bounded loops, user controls, drawing and pixel warps in arbitrary ways. Scripts still have **no file access, network access, shell, Android APIs, processes, reflection, arbitrary Kotlin/Java, native code, dynamic code loading, permissions, clipboard, contacts, microphone, package management or external storage access**.
+Instead, scripts build effects from a few safe primitives: variables, functions, conditions, bounded loops, pixel iteration, pixel writes, camera sampling, math, user inputs and MediaPipe landmarks.
 
-That boundary is intentional: the language can be extremely expressive as a filter language without becoming arbitrary app code.
+Scripts still have **no file access, network access, shell, Android APIs, processes, reflection, arbitrary Kotlin/Java, native code, dynamic code loading, permissions, clipboard, contacts, microphone, package management or external storage access**.
 
 ## Inputs
 
-Inputs become controls on the live filter screen and variables inside the script.
-
-`input number strength Eye_Size 1.8 0.5 3.0`
+`input number amount Amount 1 0 1`
 
 `input text caption Caption hello_world`
 
-Syntax: `input number|text NAME LABEL DEFAULT [MIN MAX]`. Use underscores for spaces in labels/default text.
+Syntax: `input number|text NAME LABEL DEFAULT [MIN MAX]`.
 
-## Tracking mode
+Inputs become controls on the camera screen and variables inside the script.
 
-Each app chooses **Face**, **Hand**, or **Body** in the editor.
+## Variables
 
-There is no quality or landmark-detail switch. Every tracking mode always exposes the complete landmark set returned by its MediaPipe landmarker. A valid MediaPipe landmark index therefore does not disappear because of a lower-detail mode.
+`let value = 1.5`
 
-Coordinates are normalized: x=0 is left, x=1 is right, y=0 is top, y=1 is bottom. `group 0` is the first detected face/hand/body; a second hand is usually `group 1`.
-
-The camera preview and analysis use the same CameraX viewport/crop, so landmark coordinates and scripted pixels refer to the same visible camera area.
-
-## Variables and animation
-
-Create or replace numeric variables with `let`:
-
-`let pulse = 1.3 + sin(time*4)*0.25`
+`let wave = sin(time*tau)*0.25`
 
 Built-in numeric values:
 
-- `time` — seconds since the filter engine started.
-- `frame` — processed-frame counter.
-- `tracked` — 1 when something is tracked, otherwise 0.
-- `groups` — number of tracked faces/hands/bodies.
-- `loop` — current zero-based iteration inside `repeat`.
-- `pi`, `tau`, `e` — mathematical constants.
+- `time` — seconds since this engine instance started
+- `frame` — processed-frame counter
+- `tracked` — 1 when the selected tracker found something
+- `groups` — number of tracked faces/hands/bodies
+- `loop` — zero-based index inside `repeat`
+- `pi`, `tau`, `e` — constants
+- `image_width`, `image_height`, `aspect` — current analyzed frame geometry
 
-Because `time` and `frame` change continuously, scripts can animate effects without timers or threads.
+## User functions
 
-## Landmark functions
+Functions are procedures made entirely from the same sandbox primitives.
 
-Use original MediaPipe indexes:
+`fn invert amount`
 
-- `landmark_count(group)`
-- `landmark_x(group,index)`
-- `landmark_y(group,index)`
-- `landmark_z(group,index)`
-- `point_exists(group,index)` — 1 or 0
-- `landmark_distance(group,a,b)` — normalized 2D distance
-- `landmark_mid_x(group,a,b)`
-- `landmark_mid_y(group,a,b)`
-- `landmark_angle(group,a,b,c)` — angle at point B in radians
+`  pixels`
 
-Example:
+`    set r lerp(r,1-r,amount)`
 
-`let eyeX = landmark_mid_x(0,33,133)`
+`    set g lerp(g,1-g,amount)`
 
-`let eyeY = landmark_mid_y(0,159,145)`
+`    set b lerp(b,1-b,amount)`
 
-`circle eyeX eyeY 0.025 #47D7AC stroke`
-
-## Group geometry
-
-These helpers make effects scale with the detected face/hand/body instead of using hard-coded screen sizes:
-
-- `group_min_x(group)`
-- `group_max_x(group)`
-- `group_min_y(group)`
-- `group_max_y(group)`
-- `group_width(group)`
-- `group_height(group)`
-- `group_center_x(group)`
-- `group_center_y(group)`
-
-Example: make a radius proportional to face width:
-
-`let r = group_width(0)*0.12`
-
-## Scientific math
-
-Expressions support parentheses, `+ - * / % ^`, variables and scientific notation.
-
-Functions include:
-
-- Trig: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`
-- Roots/powers: `sqrt`, `cbrt`, `pow`, `exp`, `ln`, `log10`
-- Numeric: `abs`, `floor`, `ceil`, `round`, `sign`, `min`, `max`, `sum`, `avg`, `mean`
-- Mapping/interpolation: `clamp`, `saturate`, `lerp`, `inverse_lerp`, `map`, `smoothstep`, `step`, `fract`, `wrap`
-- Geometry: `hypot`, `distance`, `angle`, `deg`, `rad`
-- Deterministic animation/noise: `noise`, `hash`
-
-Examples:
-
-`let wobble = sin(time*tau)*0.08`
-
-`let distanceFromCenter = hypot(landmark_x(0,4)-0.5,landmark_y(0,4)-0.5)`
-
-`let faceRelativeRadius = group_width(0)*0.15`
-
-## Boolean helpers
-
-Boolean helpers return 1 for true and 0 for false. They can be nested, which gives scripts complex logic without exposing arbitrary code execution.
-
-- `eq(a,b)`, `ne(a,b)`
-- `lt(a,b)`, `lte(a,b)`
-- `gt(a,b)`, `gte(a,b)`
-- `and(a,b,...)`
-- `or(a,b,...)`
-- `not(value)`
-- `select(condition,whenTrue,whenFalse)` / `ifelse(...)`
-
-Example:
-
-`if and(tracked,gt(group_width(0),0.25))`
-
-`  tint #47D7AC 0.08`
+`  end`
 
 `end`
 
-## Skeleton drawing
+Call a function with:
 
-`dots #47D7AC 4`
+`call invert 1`
 
-Draws every tracked landmark as a dot.
+Function syntax:
 
-`connections #56A8FF 3`
+`fn NAME [PARAM ...]`
 
-Draws standard face-contour/eye/lip, hand-bone, or body-pose connections using original MediaPipe landmark indexes.
+`  ...`
 
-`skeleton #56A8FF 2`
+`end`
 
-Draws a simple consecutive-point chain. `connections` usually looks better for real skeletons.
+`call NAME [ARG ...]`
 
-## Pixel effects
-
-`bulge X Y SCALE RADIUS`
-
-Creates a smooth radial lens at normalized camera coordinates. Pixels are warped outward near the center and smoothly return to their original position at the edge, so it enlarges a feature instead of stretching a rectangular crop. `X`, `Y`, `SCALE`, and `RADIUS` are numeric expressions.
-
-`magnify GROUP POINT SCALE RADIUS`
-
-Creates the same smooth radial lens centered on a tracked landmark. Example:
-
-`magnify 0 33 strength 0.10`
-
-`pixelate BLOCK_SIZE`
-
-Downsamples then nearest-neighbour upscales the visible camera frame.
-
-`tint #RRGGBB AMOUNT`
-
-Blends a color over the frame. AMOUNT is clamped from 0.0 to 1.0.
-
-Local effects such as `bulge` and `magnify` render over the native CameraX preview instead of globally zooming it.
-
-## Drawing primitives
-
-All x/y/w/h/radius coordinates are normalized to the visible camera frame.
-
-`circle X Y RADIUS #RRGGBB [stroke]`
-
-`line X1 Y1 X2 Y2 #RRGGBB [WIDTH_PIXELS]`
-
-`rect X Y W H #RRGGBB [stroke]`
-
-`text VALUE_OR_TEXT_VARIABLE X Y SIZE_PIXELS #RRGGBB`
-
-For literal text, use underscores for spaces: `text hello_world 0.05 0.10 34 #FFFFFF`.
+Functions may call other functions. Call depth is bounded by the sandbox.
 
 ## If / else
 
 `if tracked`
 
-`  connections #47D7AC 3`
+`  let strength = 1`
 
 `else`
 
-`  tint #FF0000 0.10`
+`  let strength = 0`
 
 `end`
 
-Simple comparisons `==`, `!=`, `>`, `<`, `>=`, `<=` are supported. For complex logic, prefer the boolean helpers above.
+Comparisons: `==`, `!=`, `>`, `<`, `>=`, `<=`.
 
-## Loops
+Boolean helpers return 1 or 0: `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `and`, `or`, `not`, `select` / `ifelse`.
 
-`repeat 8`
+## Bounded loops
 
-`  let radius = 0.01 + loop*0.004`
+`repeat 10`
 
-`  circle 0.5 0.5 radius #47D7AC stroke`
+`  let t = loop/9`
 
 `end`
 
-`repeat` is intentionally bounded. There is no unbounded `while` loop.
+There is deliberately no unbounded `while` loop.
 
-## Example: face-relative giant eyes
+## Pixel loop
 
-This version scales the effect with the detected face instead of using one fixed radius for every distance from the camera.
+`pixels`
 
-`input number size Eye_Size 1.9 1.0 3.0`
+`  ...`
+
+`end`
+
+Inside a `pixels` block these variables exist:
+
+- `x`, `y` — normalized pixel coordinates from 0 to 1
+- `ix`, `iy` — integer pixel coordinates
+- `r`, `g`, `b`, `a` — current output channels from 0 to 1
+
+Change the current pixel with only these essential writes:
+
+`set r EXPRESSION`
+
+`set g EXPRESSION`
+
+`set b EXPRESSION`
+
+`set a EXPRESSION`
+
+Channel values are clamped to 0..1.
+
+A pixel loop may optionally be restricted to a normalized rectangle:
+
+`pixels X Y WIDTH HEIGHT`
+
+For example:
+
+`pixels 0.25 0.25 0.5 0.5`
+
+This is important for fast local effects.
+
+Pixel loops cannot be nested.
+
+## Source camera sampling
+
+The source camera frame is read-only. Sample it at normalized coordinates with:
+
+- `sample_r(x,y)`
+- `sample_g(x,y)`
+- `sample_b(x,y)`
+- `sample_a(x,y)`
+- `sample_luma(x,y)`
+
+Coordinates are clamped to the frame and sampling is bilinear.
+
+This is enough to write custom warps, blur kernels, sharpen filters, edge detectors, chromatic effects and other image operations without adding dedicated effect commands to the engine.
+
+## Sparse pixel writing
+
+`write_pixel X Y R G B A`
+
+`write_pixel` writes one normalized output pixel. This is the low-level primitive for custom point/line/raster algorithms that do not need to scan the whole frame.
+
+Example:
+
+`repeat 100`
+
+`  let t = loop/99`
+
+`  write_pixel t t 1 0 0 1`
+
+`end`
+
+## Tracking
+
+Each app selects Face, Hand or Body. Full MediaPipe landmarks are always exposed.
+
+- `landmark_count(group)`
+- `landmark_x(group,index)`
+- `landmark_y(group,index)`
+- `landmark_z(group,index)`
+- `point_exists(group,index)`
+- `landmark_distance(group,a,b)`
+- `landmark_mid_x(group,a,b)`
+- `landmark_mid_y(group,a,b)`
+- `landmark_angle(group,a,b,c)`
+
+Tracked-object bounds:
+
+- `group_min_x(group)` / `group_max_x(group)`
+- `group_min_y(group)` / `group_max_y(group)`
+- `group_width(group)` / `group_height(group)`
+- `group_center_x(group)` / `group_center_y(group)`
+
+## Math
+
+Expressions support parentheses and `+ - * / % ^`.
+
+Available helpers include:
+
+- trig: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`
+- numeric: `sqrt`, `cbrt`, `abs`, `floor`, `ceil`, `round`, `sign`, `min`, `max`, `sum`, `avg`, `mean`, `pow`, `ln`, `log10`, `exp`
+- mapping: `clamp`, `saturate`, `lerp`, `inverse_lerp`, `map`, `smoothstep`, `step`, `fract`, `wrap`
+- geometry: `hypot`, `distance`, `angle`, `deg`, `rad`
+- deterministic animation: `noise`, `hash`
+
+## Example: invert written by the script
+
+There is no built-in invert opcode.
+
+`input number amount Invert 1 0 1`
+
+`fn invert strength`
+
+`  pixels`
+
+`    set r lerp(r,1-r,strength)`
+
+`    set g lerp(g,1-g,strength)`
+
+`    set b lerp(b,1-b,strength)`
+
+`  end`
+
+`end`
+
+`call invert amount`
+
+## Example: grayscale written by the script
+
+`fn grayscale`
+
+`  pixels`
+
+`    let gray = r*0.299+g*0.587+b*0.114`
+
+`    set r gray`
+
+`    set g gray`
+
+`    set b gray`
+
+`  end`
+
+`end`
+
+`call grayscale`
+
+## Example: custom eye bulge with no bulge opcode
+
+This uses a local pixel region and source sampling. The effect itself is written in the script.
+
+`input number size Eye_Size 1.9 1 3`
+
+`fn bulge cx cy radius scale`
+
+`  let left = cx-radius`
+
+`  let top = cy-radius`
+
+`  let diameter = radius*2`
+
+`  pixels left top diameter diameter`
+
+`    let dx = x-cx`
+
+`    let dy = y-cy`
+
+`    let d = hypot(dx,dy)`
+
+`    if lt(d,radius)`
+
+`      let t = d/radius`
+
+`      let localScale = 1+(scale-1)*(1-t)*(1-t)`
+
+`      let sx = cx+dx/localScale`
+
+`      let sy = cy+dy/localScale`
+
+`      set r sample_r(sx,sy)`
+
+`      set g sample_g(sx,sy)`
+
+`      set b sample_b(sx,sy)`
+
+`      set a sample_a(sx,sy)`
+
+`    end`
+
+`  end`
+
+`end`
 
 `if tracked`
 
@@ -215,61 +291,34 @@ This version scales the effect with the detected face instead of using one fixed
 
 `  let rightY = landmark_mid_y(0,386,374)`
 
-`  let eyeRadius = group_width(0)*0.115`
+`  let radius = group_width(0)*0.115`
 
-`  bulge leftX leftY size eyeRadius`
+`  call bulge leftX leftY radius size`
 
-`  bulge rightX rightY size eyeRadius`
-
-`end`
-
-## Example: cyber hand
-
-`input number glow Glow 5 1 15`
-
-`connections #47D7AC glow`
-
-`dots #56A8FF 3`
-
-`if tracked`
-
-`  let wobble = sin(time*4)*0.02`
-
-`  circle landmark_x(0,8) landmark_y(0,8) 0.035+wobble #FFFFFF stroke`
+`  call bulge rightX rightY radius size`
 
 `end`
 
-## Example: adaptive face halo
+## Safety and resource limits
 
-`if tracked`
+The sandbox is capability-based. Scripts only receive numbers, text inputs, time/frame values, MediaPipe landmarks, a read-only camera sampler and bounded output-pixel writes.
 
-`  let cx = group_center_x(0)`
+Hard limits include:
 
-`  let cy = group_center_y(0)`
+- maximum script size
+- maximum statement count
+- maximum function count and parameters
+- maximum expression size, parser work and nesting
+- maximum function call depth
+- bounded `repeat`
+- no nested `pixels`
+- per-frame operation budget
+- per-frame pixel-visit budget
+- coordinates and color channels are clamped
+- CameraX uses `KEEP_ONLY_LATEST`, so expensive scripts drop analysis frames instead of building an endless queue
 
-`  let r = max(group_width(0),group_height(0))*0.6`
-
-`  circle cx cy r #56A8FF stroke`
-
-`end`
-
-## Sandbox and resource limits
-
-The safety model is capability-based: scripts only receive numbers, text inputs, MediaPipe landmarks, time/frame values, a bounded drawing target and a fixed whitelist of filter operations.
-
-Safety rules include:
-
-- No filesystem, network, shell, Android API, reflection, process, native-code or dynamic-code access.
-- No arbitrary class/function dispatch. Unknown script functions fail instead of secretly calling host code.
-- No unbounded loops. `repeat` is capped at 1000 iterations per execution.
-- Expressions are capped at 1024 characters, 4096 parser steps, 64 nesting levels and 16 function arguments.
-- Bulge/magnification radius and scale are clamped.
-- Divide-by-zero and non-finite math resolve safely.
-- CameraX uses `KEEP_ONLY_LATEST`, so expensive analysis drops stale frames instead of creating an ever-growing queue.
-- The visible camera preview remains independent for overlay-style effects.
-
-This means the language is intentionally **not** a general Android programming language. It is designed to be as programmable as practical for camera filters while keeping the host device outside the script sandbox.
+The goal is broad visual programmability without giving user scripts capabilities outside the filter sandbox.
 
 ## Keeping docs current
 
-This file is the canonical scripting reference and is bundled directly into the APK. The in-app Docs page reads this exact asset and its Copy Docs button copies the same text. Updating `app/src/main/assets/SCRIPTING.md` updates both the repository reference and the in-app reference on the next build.
+This file is the canonical scripting reference. The in-app Docs page reads this exact asset and Copy Docs copies the same text.
