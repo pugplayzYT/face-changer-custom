@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarker
 
 /**
  * Native raster fast-path for the unmodified bundled tracking examples.
@@ -31,7 +32,7 @@ internal fun renderBundledTrackingOverlay(
             (overlayStyle.lineB * 255f).toInt()
         )
         this.style = Paint.Style.STROKE
-        strokeWidth = 1.6f
+        strokeWidth = 1.25f
         strokeCap = Paint.Cap.ROUND
         strokeJoin = Paint.Join.ROUND
     }
@@ -50,7 +51,7 @@ internal fun renderBundledTrackingOverlay(
         TrackingMode.BODY -> BODY_EDGES
     }
     val dotRadius = when (mode) {
-        TrackingMode.FACE -> 1.45f
+        TrackingMode.FACE -> 1.35f
         TrackingMode.HAND -> 2.6f
         TrackingMode.BODY -> 2.6f
     }
@@ -74,8 +75,8 @@ internal fun renderBundledTrackingOverlay(
             )
         }
 
-        // Draw every point returned by MediaPipe. Face mode therefore shows the full dense point
-        // cloud instead of only the small contour subset used by the previous generated script.
+        // Draw every point returned by MediaPipe. Face mode therefore shows the complete dense
+        // landmark cloud rather than only the contour points used by the old generated script.
         group.forEach { point ->
             canvas.drawCircle(
                 point.x * (width - 1),
@@ -122,21 +123,22 @@ private fun bundledStyle(code: String, mode: TrackingMode): OverlayStyle? {
     }
 }
 
-private fun loop(points: List<Int>): List<Pair<Int, Int>> =
-    if (points.size < 2) emptyList() else points.zipWithNext() + (points.last() to points.first())
-
-private val FACE_EDGES: List<Pair<Int, Int>> = buildList {
-    addAll(loop(listOf(10,338,297,332,284,251,389,356,454,323,361,288,397,365,379,378,400,377,152,148,176,149,150,136,172,58,132,93,234,127,162,21,54,103,67,109)))
-    addAll(loop(listOf(33,7,163,144,145,153,154,155,133,173,157,158,159,160,161,246)))
-    addAll(loop(listOf(263,249,390,373,374,380,381,382,362,398,384,385,386,387,388,466)))
-    addAll(loop(listOf(61,146,91,181,84,17,314,405,321,375,291,409,270,269,267,0,37,39,40,185)))
-    addAll(loop(listOf(78,95,88,178,87,14,317,402,318,324,308,415,310,311,312,13,82,81,80,191)))
-    addAll(listOf(70 to 63,63 to 105,105 to 66,66 to 107,46 to 53,53 to 52,52 to 65,65 to 55))
-    addAll(listOf(336 to 296,296 to 334,334 to 293,293 to 300,276 to 283,283 to 282,282 to 295,295 to 285))
-    addAll(listOf(168 to 6,6 to 197,197 to 195,195 to 5,5 to 4,4 to 1,1 to 19,19 to 94,94 to 2))
-    addAll(listOf(98 to 97,97 to 2,2 to 326,326 to 327,327 to 294,294 to 278,278 to 344,344 to 440,440 to 275,275 to 4,4 to 45,45 to 220,220 to 115,115 to 48,48 to 64,64 to 98))
-    addAll(loop(listOf(469,470,471,472)))
-    addAll(loop(listOf(474,475,476,477)))
+/**
+ * Use MediaPipe's own official tessellation instead of maintaining a tiny hand-picked contour list.
+ * This is the dense mesh users expect: every tessellation edge plus both iris loops when present.
+ */
+private val FACE_EDGES: List<Pair<Int, Int>> by lazy {
+    buildList {
+        FaceLandmarker.FACE_LANDMARKS_TESSELATION.forEach { connection ->
+            add(connection.start() to connection.end())
+        }
+        FaceLandmarker.FACE_LANDMARKS_LEFT_IRIS.forEach { connection ->
+            add(connection.start() to connection.end())
+        }
+        FaceLandmarker.FACE_LANDMARKS_RIGHT_IRIS.forEach { connection ->
+            add(connection.start() to connection.end())
+        }
+    }
 }
 
 private val HAND_EDGES = listOf(
