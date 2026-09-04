@@ -9,10 +9,10 @@ import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.TextView
+import androidx.camera.core.AspectRatio
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
-import androidx.camera.core.UseCaseGroup
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.layout.fillMaxSize
@@ -29,15 +29,13 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Smooth native CameraX preview plus separately throttled MediaPipe/script analysis.
+ * Native CameraX preview plus a separately analyzed effect layer.
  *
- * CameraX's ViewPort already crops ImageAnalysis to the same visible field of view as PreviewView.
- * The effect layer therefore stretches that already-cropped bitmap to the host instead of applying
- * a second CENTER_CROP, which previously made every processed filter look heavily zoomed in.
- *
- * Pixel programs are converted to a difference overlay: unchanged camera pixels become transparent
- * so local face/hand/body effects preserve the full-resolution native preview everywhere they do
- * not actually modify the image. Only genuinely changed pixels cover the preview.
+ * Preview and analysis deliberately use the same 4:3 camera aspect ratio and both are FIT_CENTER.
+ * The old full-screen FILL_CENTER/ViewPort path cropped a tall phone screen out of a 4:3 camera
+ * feed, which looked like a permanent digital zoom and made tiny transform differences obvious.
+ * Keeping the whole sensor frame also means MediaPipe landmarks and script pixels share one simple
+ * coordinate system: the upright, optionally mirrored analysis bitmap.
  */
 @Composable
 fun FilterCameraView(
@@ -56,14 +54,14 @@ fun FilterCameraView(
     val previewView = remember {
         PreviewView(context).apply {
             implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-            scaleType = PreviewView.ScaleType.FILL_CENTER
+            scaleType = PreviewView.ScaleType.FIT_CENTER
         }
     }
     val effectView = remember {
         ImageView(context).apply {
-            // ImageAnalysis has already been cropped with PreviewView's ViewPort. CENTER_CROP here
-            // cropped it a second time and was the source of the giant apparent zoom.
-            scaleType = ImageView.ScaleType.FIT_XY
+            // The processed bitmap has the same 4:3 source geometry as PreviewView. Never stretch
+            // or crop it independently or landmark overlays stop lining up with the live preview.
+            scaleType = ImageView.ScaleType.FIT_CENTER
             setBackgroundColor(android.graphics.Color.TRANSPARENT)
         }
     }
@@ -78,6 +76,7 @@ fun FilterCameraView(
     }
     val host = remember {
         FrameLayout(context).apply {
+            setBackgroundColor(android.graphics.Color.BLACK)
             addView(
                 previewView,
                 FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
@@ -151,123 +150,103 @@ fun FilterCameraView(
             }
             provider = cameraProvider
 
-            fun bindWhenReady() {
-                if (!active.get()) return
-                val viewPort = previewView.viewPort
-                if (viewPort == null || previewView.width == 0 || previewView.height == 0) {
-                    previewView.postDelayed({ bindWhenReady() }, 16L)
-                    return
+            val rotation = previewView.display?.rotation ?: android.view.Surface.ROTATION_0
+            val preview = Preview.Builder()
+                .setTargetRotation(rotation)
+                .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+                .build()
+                .also { it.setSurfaceProvider(previewView.surfaceProvider) }
+
+            // Sparse and local effects get 640x480. Truly global interpreted pixel filters use a
+            // smaller frame because they necessarily execute user code for every camera pixel.
+            val analysisSize = if (hasGlobalPixels) {
+                android.util.Size(480, 360)
+            } else {
+                android.util.Size(640, 480)
+            }
+
+            val localAnalysis = ImageAnalysis.Builder()
+                .setTargetRotation(rotation)
+                .setTargetResolution(analysisSize)
+                .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .build()
+            analysis = localAnalysis
+
+            localAnalysis.setAnalyzer(worker) { proxy ->
+                if (!active.get()) {
+                    proxy.close()
+                    return@setAnalyzer
                 }
 
-                val rotation = previewView.display?.rotation ?: android.view.Surface.ROTATION_0
-                val preview = Preview.Builder()
-                    .setTargetRotation(rotation)
-                    .build()
-                    .also { it.setSurfaceProvider(previewView.surfaceProvider) }
-
-                // Local pixel effects only touch a small rectangle, so they can afford a proper
-                // 640x480 analysis frame. Truly full-frame interpreted filters use a compromise
-                // resolution to avoid turning the sandbox into a slideshow.
-                val analysisSize = if (hasGlobalPixels) {
-                    android.util.Size(480, 360)
-                } else {
-                    android.util.Size(640, 480)
-                }
-
-                val localAnalysis = ImageAnalysis.Builder()
-                    .setTargetRotation(rotation)
-                    .setTargetResolution(analysisSize)
-                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .build()
-                analysis = localAnalysis
-
-                localAnalysis.setAnalyzer(worker) { proxy ->
-                    if (!active.get()) {
-                        proxy.close()
-                        return@setAnalyzer
-                    }
-
-                    var cameraBitmap: Bitmap? = null
-                    var output: Bitmap? = null
-                    try {
-                        cameraBitmap = proxyToVisibleBitmap(proxy, front)
-                        val tracking = if (needsTracking) {
-                            try {
-                                tracker.detect(cameraBitmap, mode)
-                            } catch (t: Throwable) {
-                                throw IllegalStateException(
-                                    "MediaPipe ${mode.name.lowercase()} tracking could not run",
-                                    t
-                                )
-                            }
-                        } else {
-                            // Color-only filters such as a user-written invert do not need to pay
-                            // the MediaPipe cost every frame.
-                            TrackingFrame(mode, emptyList(), System.currentTimeMillis())
-                        }
-
-                        output = if (program.usesPixels) {
-                            // render() starts from an exact copy of the source camera frame. Convert
-                            // that result into a transparent difference layer so a local warp does
-                            // not replace the entire smooth/high-resolution preview with a low-res
-                            // analysis bitmap.
-                            engine.render(cameraBitmap, tracking, program, latestValues.get()).also {
-                                makeDifferenceOverlay(cameraBitmap, it)
-                            }
-                        } else {
-                            engine.renderOverlay(cameraBitmap, tracking, program, latestValues.get())
-                        }
-
-                        val frameToPost = output
-                        if (active.get() && frameToPost != null && uiFramePending.compareAndSet(false, true)) {
-                            mainExecutor.execute {
-                                try {
-                                    if (active.get() && !frameToPost.isRecycled) {
-                                        val old = displayed
-                                        effectView.setImageBitmap(frameToPost)
-                                        effectView.visibility = View.VISIBLE
-                                        displayed = frameToPost
-                                        if (old != null && old !== frameToPost && !old.isRecycled) old.recycle()
-                                    } else if (!frameToPost.isRecycled) {
-                                        frameToPost.recycle()
-                                    }
-                                } finally {
-                                    uiFramePending.set(false)
-                                }
-                            }
-                            output = null
-                        }
-                        clearError()
-                    } catch (t: Throwable) {
-                        showError("Filter runtime error", t)
-                    } finally {
-                        output?.let { if (!it.isRecycled) it.recycle() }
-                        cameraBitmap?.let { if (!it.isRecycled) it.recycle() }
-                        proxy.close()
-                    }
-                }
-
-                val group = UseCaseGroup.Builder()
-                    .setViewPort(viewPort)
-                    .addUseCase(preview)
-                    .addUseCase(localAnalysis)
-                    .build()
-
+                var cameraBitmap: Bitmap? = null
+                var output: Bitmap? = null
                 try {
-                    cameraProvider.unbindAll()
-                    cameraProvider.bindToLifecycle(
-                        lifecycle,
-                        if (front) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA,
-                        group
-                    )
+                    cameraBitmap = proxyToDisplayBitmap(proxy, front)
+                    val tracking = if (needsTracking) {
+                        try {
+                            tracker.detect(cameraBitmap, mode)
+                        } catch (t: Throwable) {
+                            throw IllegalStateException(
+                                "MediaPipe ${mode.name.lowercase()} tracking could not run",
+                                t
+                            )
+                        }
+                    } else {
+                        TrackingFrame(mode, emptyList(), System.currentTimeMillis())
+                    }
+
+                    output = if (program.usesPixels) {
+                        engine.render(cameraBitmap, tracking, program, latestValues.get()).also {
+                            // Keep the full-resolution native preview wherever a pixel program made
+                            // no change. Local eye/face warps therefore cover only their actual mask.
+                            makeDifferenceOverlay(cameraBitmap, it)
+                        }
+                    } else {
+                        engine.renderOverlay(cameraBitmap, tracking, program, latestValues.get())
+                    }
+
+                    val frameToPost = output
+                    if (active.get() && frameToPost != null && uiFramePending.compareAndSet(false, true)) {
+                        mainExecutor.execute {
+                            try {
+                                if (active.get() && !frameToPost.isRecycled) {
+                                    val old = displayed
+                                    effectView.setImageBitmap(frameToPost)
+                                    effectView.visibility = View.VISIBLE
+                                    displayed = frameToPost
+                                    if (old != null && old !== frameToPost && !old.isRecycled) old.recycle()
+                                } else if (!frameToPost.isRecycled) {
+                                    frameToPost.recycle()
+                                }
+                            } finally {
+                                uiFramePending.set(false)
+                            }
+                        }
+                        output = null
+                    }
                     clearError()
                 } catch (t: Throwable) {
-                    showError("Camera bind failed", t)
+                    showError("Filter runtime error", t)
+                } finally {
+                    output?.let { if (!it.isRecycled) it.recycle() }
+                    cameraBitmap?.let { if (!it.isRecycled) it.recycle() }
+                    proxy.close()
                 }
             }
 
-            previewView.post { bindWhenReady() }
+            try {
+                cameraProvider.unbindAll()
+                cameraProvider.bindToLifecycle(
+                    lifecycle,
+                    if (front) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA,
+                    preview,
+                    localAnalysis
+                )
+                clearError()
+            } catch (t: Throwable) {
+                showError("Camera bind failed", t)
+            }
         }, mainExecutor)
 
         onDispose {
@@ -299,10 +278,7 @@ private fun containsGlobalPixels(statements: List<ScriptEngine.Statement>): Bool
     }
 }
 
-/**
- * Turn a fully rendered frame into an overlay by making pixels that are byte-for-byte identical to
- * the source transparent. Local pixel filters therefore only cover the part they actually changed.
- */
+/** Make unchanged pixels transparent so the native preview remains visible underneath. */
 private fun makeDifferenceOverlay(source: Bitmap, rendered: Bitmap) {
     require(source.width == rendered.width && source.height == rendered.height) {
         "Rendered filter size does not match camera frame"
@@ -333,15 +309,12 @@ private fun throwableDetails(throwable: Throwable): String {
     val chain = generateSequence(throwable) { it.cause }.toList()
     val useful = chain.asReversed().firstOrNull { !it.message.isNullOrBlank() } ?: throwable
     val detail = useful.message?.trim().orEmpty()
-    return if (detail.isNotEmpty()) {
-        detail.take(220)
-    } else {
-        useful::class.java.simpleName.ifBlank { "Unknown error" }
-    }
+    return if (detail.isNotEmpty()) detail.take(220)
+    else useful::class.java.simpleName.ifBlank { "Unknown error" }
 }
 
-/** Apply CameraX's shared ViewPort crop before rotation/mirroring. */
-private fun proxyToVisibleBitmap(proxy: androidx.camera.core.ImageProxy, mirror: Boolean): Bitmap {
+/** Convert CameraX's buffer into exactly the upright image shown by the effect layer. */
+private fun proxyToDisplayBitmap(proxy: androidx.camera.core.ImageProxy, mirror: Boolean): Bitmap {
     val raw = proxy.toBitmap()
     val crop = proxy.cropRect
     val cropped = if (
@@ -353,17 +326,38 @@ private fun proxyToVisibleBitmap(proxy: androidx.camera.core.ImageProxy, mirror:
             if (it !== raw && !raw.isRecycled) raw.recycle()
         }
     }
-    return rotateCameraBitmap(cropped, proxy.imageInfo.rotationDegrees, mirror)
-}
 
-private fun rotateCameraBitmap(source: Bitmap, degrees: Int, mirror: Boolean): Bitmap {
-    if (degrees == 0 && !mirror) return source
-    val matrix = Matrix()
-    if (degrees != 0) matrix.postRotate(degrees.toFloat())
-    if (mirror) matrix.postScale(-1f, 1f)
-    val out = Bitmap.createBitmap(source, 0, 0, source.width, source.height, matrix, true)
-    if (out !== source && !source.isRecycled) source.recycle()
-    return out
+    val rotated = if (proxy.imageInfo.rotationDegrees == 0) {
+        cropped
+    } else {
+        Bitmap.createBitmap(
+            cropped,
+            0,
+            0,
+            cropped.width,
+            cropped.height,
+            Matrix().apply { setRotate(proxy.imageInfo.rotationDegrees.toFloat()) },
+            true
+        ).also {
+            if (it !== cropped && !cropped.isRecycled) cropped.recycle()
+        }
+    }
+
+    if (!mirror) return rotated
+
+    // Mirror only after rotation. Doing both transforms in one matrix made the operation order easy
+    // to get wrong on portrait front-camera buffers and produced rotated/misaligned landmarks.
+    return Bitmap.createBitmap(
+        rotated,
+        0,
+        0,
+        rotated.width,
+        rotated.height,
+        Matrix().apply { setScale(-1f, 1f) },
+        true
+    ).also {
+        if (it !== rotated && !rotated.isRecycled) rotated.recycle()
+    }
 }
 
 private const val TAG = "FaceChangerCamera"
