@@ -38,8 +38,6 @@ import org.json.JSONObject
 import java.util.UUID
 import java.util.concurrent.Executors
 
-private const val SIGN_IN_KEY = "I am super cool 27"
-
 private val Dark = Color(0xFF090D12)
 private val Surface = Color(0xFF121923)
 private val Surface2 = Color(0xFF1A2431)
@@ -70,19 +68,6 @@ private enum class Screen { HOME, EDITOR, DOCS, CAMERA }
 private fun FaceChangerApp() {
     val context = androidx.compose.ui.platform.LocalContext.current
     val prefs = remember { context.getSharedPreferences("face_changer", Context.MODE_PRIVATE) }
-    var signedIn by remember { mutableStateOf(prefs.getBoolean("signed_in", false)) }
-
-    if (!signedIn) {
-        SignInScreen { key ->
-            if (key == SIGN_IN_KEY) {
-                prefs.edit().putBoolean("signed_in", true).apply()
-                signedIn = true
-                true
-            } else false
-        }
-        return
-    }
-
     var screen by remember { mutableStateOf(Screen.HOME) }
     var apps by remember { mutableStateOf(loadApps(prefs)) }
     var selected by remember { mutableStateOf<FilterApp?>(null) }
@@ -93,13 +78,8 @@ private fun FaceChangerApp() {
             onRun = { selected = it; screen = Screen.CAMERA },
             onEdit = { selected = it; screen = Screen.EDITOR },
             onAdd = { selected = null; screen = Screen.EDITOR },
-            onDocs = { screen = Screen.DOCS },
-            onSignOut = {
-                prefs.edit().putBoolean("signed_in", false).apply()
-                signedIn = false
-            }
+            onDocs = { screen = Screen.DOCS }
         )
-
         Screen.EDITOR -> EditorScreen(
             existing = selected,
             onBack = { screen = Screen.HOME },
@@ -110,50 +90,9 @@ private fun FaceChangerApp() {
             },
             onDocs = { screen = Screen.DOCS }
         )
-
         Screen.DOCS -> DocsScreen { screen = Screen.HOME }
         Screen.CAMERA -> selected?.let { CameraScreen(it) { screen = Screen.HOME } }
             ?: run { screen = Screen.HOME }
-    }
-}
-
-@Composable
-private fun SignInScreen(onTry: (String) -> Boolean) {
-    var key by remember { mutableStateOf("") }
-    var bad by remember { mutableStateOf(false) }
-
-    Box(
-        Modifier.fillMaxSize().background(Dark).padding(28.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Card(colors = CardDefaults.cardColors(containerColor = Surface)) {
-            Column(
-                Modifier.padding(24.dp),
-                verticalArrangement = Arrangement.spacedBy(18.dp)
-            ) {
-                Box(
-                    Modifier.size(58.dp).background(Accent.copy(alpha = .14f), RoundedCornerShape(18.dp)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(Icons.Default.AutoAwesome, null, tint = Accent, modifier = Modifier.size(32.dp))
-                }
-                Text("Face Changer Custom", fontSize = 30.sp, fontWeight = FontWeight.Black)
-                Text("Open-source MediaPipe filter lab", color = Color(0xFF94A3AF))
-                OutlinedTextField(
-                    value = key,
-                    onValueChange = { key = it; bad = false },
-                    label = { Text("Sign-in key") },
-                    isError = bad,
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Button(
-                    onClick = { bad = !onTry(key) },
-                    modifier = Modifier.fillMaxWidth().height(54.dp)
-                ) { Text("Enter studio") }
-                if (bad) Text("That key doesn't match.", color = MaterialTheme.colorScheme.error)
-            }
-        }
     }
 }
 
@@ -163,22 +102,17 @@ private fun HomeScreen(
     onRun: (FilterApp) -> Unit,
     onEdit: (FilterApp) -> Unit,
     onAdd: () -> Unit,
-    onDocs: () -> Unit,
-    onSignOut: () -> Unit
+    onDocs: () -> Unit
 ) {
     Scaffold(
         containerColor = Dark,
         topBar = {
-            Row(
-                Modifier.fillMaxWidth().padding(20.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            Row(Modifier.fillMaxWidth().padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("Filter Studio", fontSize = 28.sp, fontWeight = FontWeight.Black)
                     Text("MediaPipe + your code", color = Color(0xFF8E9AA6))
                 }
                 IconButton(onClick = onDocs) { Icon(Icons.Default.MenuBook, "Docs") }
-                IconButton(onClick = onSignOut) { Icon(Icons.Default.Logout, "Sign out") }
             }
         },
         floatingActionButton = {
@@ -224,10 +158,9 @@ private fun HomeScreen(
                                     Text(app.name, fontWeight = FontWeight.Bold, fontSize = 18.sp)
                                     if (app.builtIn) {
                                         Spacer(Modifier.width(8.dp))
-                                        Surface(
-                                            color = Blue.copy(.14f),
-                                            shape = RoundedCornerShape(50)
-                                        ) { Text("BUILT-IN", color = Blue, fontSize = 9.sp, modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)) }
+                                        Surface(color = Blue.copy(.14f), shape = RoundedCornerShape(50)) {
+                                            Text("BUILT-IN", color = Blue, fontSize = 9.sp, modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp))
+                                        }
                                     }
                                 }
                                 Text("${app.mode} • ${app.detail}", color = Color(0xFF8E9AA6), fontSize = 12.sp)
@@ -258,9 +191,7 @@ private fun EditorScreen(
     var mode by remember(existing?.id) { mutableStateOf(existing?.mode ?: TrackingMode.FACE) }
     var detail by remember(existing?.id) { mutableStateOf(existing?.detail ?: DetailLevel.HIGH) }
     var code by remember(existing?.id) {
-        mutableStateOf(
-            existing?.code ?: "input number strength Eye_Size 1.8 0.5 3.0\nlet pulse = strength+sin(time*5)*0.12\nif point_exists(0,33) > 0\n  magnify 0 33 pulse 0.10\n  connections #47D7AC 2\nend"
-        )
+        mutableStateOf(existing?.code ?: "input number strength Eye_Size 1.8 0.5 3.0\nlet pulse = strength+sin(time*5)*0.12\nif point_exists(0,33) > 0\n  magnify 0 33 pulse 0.10\n  connections #47D7AC 2\nend")
     }
     var error by remember { mutableStateOf<String?>(null) }
     val engine = remember { ScriptEngine() }
@@ -268,10 +199,7 @@ private fun EditorScreen(
     Scaffold(
         containerColor = Dark,
         topBar = {
-            Row(
-                Modifier.fillMaxWidth().padding(12.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, null) }
                 Column(Modifier.weight(1f)) {
                     Text(
@@ -320,15 +248,15 @@ private fun EditorScreen(
             item {
                 Text("Tracking mode", fontWeight = FontWeight.Bold)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TrackingMode.entries.forEach {
-                        FilterChip(selected = mode == it, onClick = { mode = it }, label = { Text(it.name) })
+                    TrackingMode.entries.forEach { value ->
+                        FilterChip(selected = mode == value, onClick = { mode = value }, label = { Text(value.name) })
                     }
                 }
                 Spacer(Modifier.height(6.dp))
                 Text("Detail", fontWeight = FontWeight.Bold)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    DetailLevel.entries.forEach {
-                        FilterChip(selected = detail == it, onClick = { detail = it }, label = { Text(it.name) })
+                    DetailLevel.entries.forEach { value ->
+                        FilterChip(selected = detail == value, onClick = { detail = value }, label = { Text(value.name) })
                     }
                 }
             }
@@ -356,10 +284,7 @@ private fun DocsScreen(onBack: () -> Unit) {
     Scaffold(
         containerColor = Dark,
         topBar = {
-            Row(
-                Modifier.fillMaxWidth().padding(12.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, null) }
                 Column(Modifier.weight(1f)) {
                     Text("Scripting docs", fontSize = 22.sp, fontWeight = FontWeight.Bold)
@@ -381,7 +306,7 @@ private fun DocsScreen(onBack: () -> Unit) {
                 when {
                     raw.startsWith("# ") -> {
                         Spacer(Modifier.height(8.dp))
-                        Text(raw.removePrefix("# "), fontSize = 28.sp, fontWeight = FontWeight.Black, color = Color.White)
+                        Text(raw.removePrefix("# "), fontSize = 28.sp, fontWeight = FontWeight.Black)
                         Spacer(Modifier.height(8.dp))
                     }
                     raw.startsWith("## ") -> {
@@ -399,13 +324,7 @@ private fun DocsScreen(onBack: () -> Unit) {
                         shape = RoundedCornerShape(10.dp),
                         modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
                     ) {
-                        Text(
-                            raw.removeSurrounding("`"),
-                            fontFamily = FontFamily.Monospace,
-                            color = Color(0xFFBFEBDD),
-                            fontSize = 13.sp,
-                            modifier = Modifier.padding(12.dp)
-                        )
+                        Text(raw.removeSurrounding("`"), fontFamily = FontFamily.Monospace, color = Color(0xFFBFEBDD), fontSize = 13.sp, modifier = Modifier.padding(12.dp))
                     }
                     raw.isBlank() -> Spacer(Modifier.height(5.dp))
                     else -> Text(raw, color = Color(0xFFD1DAE2), lineHeight = 20.sp)
@@ -437,19 +356,11 @@ private fun CameraScreen(app: FilterApp, onBack: () -> Unit) {
         if (granted && program != null) {
             CameraFeed(front, app, engine, program, values) { frame = it }
         } else {
-            Text(
-                if (!granted) "Camera permission is required" else "Script error",
-                modifier = Modifier.align(Alignment.Center)
-            )
+            Text(if (!granted) "Camera permission is required" else "Script error", modifier = Modifier.align(Alignment.Center))
         }
 
         frame?.let {
-            androidx.compose.foundation.Image(
-                it.asImageBitmap(),
-                null,
-                Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop
-            )
+            androidx.compose.foundation.Image(it.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
         }
 
         Row(
@@ -482,12 +393,7 @@ private fun CameraScreen(app: FilterApp, onBack: () -> Unit) {
                                 valueRange = lo.toFloat()..hi.toFloat()
                             )
                         } else {
-                            OutlinedTextField(
-                                values[input.name] ?: "",
-                                { values[input.name] = it },
-                                label = { Text(input.label) },
-                                modifier = Modifier.fillMaxWidth()
-                            )
+                            OutlinedTextField(values[input.name] ?: "", { values[input.name] = it }, label = { Text(input.label) }, modifier = Modifier.fillMaxWidth())
                         }
                     }
                 }
@@ -530,7 +436,7 @@ private fun CameraFeed(
                     mainExecutor.execute { onFrame(rendered) }
                     if (rendered !== bitmap) bitmap.recycle()
                 } catch (_: Throwable) {
-                    // Keep the camera stream alive if one frame or custom expression fails.
+                    // Keep the stream alive if one frame or custom expression fails.
                 } finally {
                     proxy.close()
                 }
@@ -562,33 +468,9 @@ private fun rotateBitmap(source: Bitmap, degrees: Int, mirror: Boolean): Bitmap 
 }
 
 private fun builtIns() = listOf(
-    FilterApp(
-        "builtin-face",
-        "Face Mesh",
-        "High-detail face contour, eyes and lip connections. Open source to see the exact filter script.",
-        TrackingMode.FACE,
-        DetailLevel.HIGH,
-        "connections #56A8FF 2\ndots #47D7AC 2",
-        true
-    ),
-    FilterApp(
-        "builtin-hand",
-        "Hand Skeleton",
-        "Tracks up to two hands and draws the standard hand-bone connections.",
-        TrackingMode.HAND,
-        DetailLevel.HIGH,
-        "connections #47D7AC 4\ndots #56A8FF 4",
-        true
-    ),
-    FilterApp(
-        "builtin-body",
-        "Body Skeleton",
-        "Full-body pose landmarks with standard shoulder, limb and torso connections.",
-        TrackingMode.BODY,
-        DetailLevel.HIGH,
-        "connections #56A8FF 4\ndots #47D7AC 4",
-        true
-    )
+    FilterApp("builtin-face", "Face Mesh", "High-detail face contour, eyes and lip connections. Open source to see the exact filter script.", TrackingMode.FACE, DetailLevel.HIGH, "connections #56A8FF 2\ndots #47D7AC 2", true),
+    FilterApp("builtin-hand", "Hand Skeleton", "Tracks up to two hands and draws the standard hand-bone connections.", TrackingMode.HAND, DetailLevel.HIGH, "connections #47D7AC 4\ndots #56A8FF 4", true),
+    FilterApp("builtin-body", "Body Skeleton", "Full-body pose landmarks with standard shoulder, limb and torso connections.", TrackingMode.BODY, DetailLevel.HIGH, "connections #56A8FF 4\ndots #47D7AC 4", true)
 )
 
 private fun saveApps(prefs: android.content.SharedPreferences, apps: List<FilterApp>) {
