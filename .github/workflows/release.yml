@@ -20,8 +20,8 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-      - name: Build signed release APK
-        run: gradle --no-daemon clean assembleRelease -PciVersionCode=${{ github.run_number }}
+      - name: Test and build signed release APK
+        run: gradle --no-daemon clean testDebugUnitTest assembleRelease -PciVersionCode=${{ github.run_number }}
       - name: Rename APK
         run: cp app/build/outputs/apk/release/app-release.apk face-changer-custom-release.apk
       - uses: actions/upload-artifact@v4
