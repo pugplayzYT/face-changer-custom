@@ -22,6 +22,7 @@ import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
+import androidx.camera.core.UseCaseGroup
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.layout.fillMaxSize
@@ -32,6 +33,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.core.view.doOnLayout
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -40,9 +42,9 @@ import java.util.concurrent.atomic.AtomicReference
 /**
  * Native CameraX preview plus a separately analyzed effect layer.
  *
- * Preview and analysis deliberately use the same 4:3 camera aspect ratio and both are FIT_CENTER.
- * Keeping the whole sensor frame means MediaPipe landmarks and script pixels share one simple
- * coordinate system: the upright, optionally mirrored analysis bitmap.
+ * Preview and analysis share CameraX's viewport crop and fill the camera surface.
+ * MediaPipe and script pixels use the same upright, optionally mirrored cropped bitmap.
+ * A full-frame pixel block covers the whole visible preview, including its bottom edge.
  *
  * Performance is FPS-only: LOW=15, MEDIUM=30 and MAX=60. The setting never changes model quality,
  * landmark count, smoothing, resolution or script semantics. Tracking runs on its own worker so a
@@ -68,12 +70,12 @@ fun FilterCameraView(
     val previewView = remember {
         PreviewView(context).apply {
             implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-            scaleType = PreviewView.ScaleType.FIT_CENTER
+            scaleType = PreviewView.ScaleType.FILL_CENTER
         }
     }
     val effectView = remember {
         ImageView(context).apply {
-            scaleType = ImageView.ScaleType.FIT_CENTER
+            scaleType = ImageView.ScaleType.CENTER_CROP
             setBackgroundColor(android.graphics.Color.TRANSPARENT)
         }
     }
@@ -195,158 +197,164 @@ fun FilterCameraView(
             }
             provider = cameraProvider
 
-            val rotation = previewView.display?.rotation ?: android.view.Surface.ROTATION_0
-            val preview = Preview.Builder()
-                .setTargetRotation(rotation)
-                .setTargetAspectRatio(AspectRatio.RATIO_4_3)
-                .build()
-                .also { it.setSurfaceProvider(previewView.surfaceProvider) }
+            previewView.doOnLayout {
+                if (!active.get()) return@doOnLayout
+                val rotation = previewView.display?.rotation ?: android.view.Surface.ROTATION_0
+                val preview = Preview.Builder()
+                    .setTargetRotation(rotation)
+                    .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+                    .build()
+                    .also { it.setSurfaceProvider(previewView.surfaceProvider) }
 
-            val analysisSize = if (hasGlobalPixels) {
-                android.util.Size(480, 360)
-            } else {
-                android.util.Size(640, 480)
-            }
-
-            val localAnalysis = ImageAnalysis.Builder()
-                .setTargetRotation(rotation)
-                .setTargetResolution(analysisSize)
-                .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .build()
-            analysis = localAnalysis
-
-            localAnalysis.setAnalyzer(renderWorker) { proxy ->
-                if (!active.get()) {
-                    proxy.close()
-                    return@setAnalyzer
+                val analysisSize = if (hasGlobalPixels && compiledPixelProgram?.usesColorLookup != true) {
+                    android.util.Size(480, 360)
+                } else {
+                    android.util.Size(640, 480)
                 }
 
-                // The performance control changes only this deadline. Resolution, model, landmark
-                // count and all visual semantics stay identical at LOW, MEDIUM and MAX.
-                if (!framePacer.shouldProcess(System.nanoTime())) {
-                    proxy.close()
-                    return@setAnalyzer
-                }
+                val localAnalysis = ImageAnalysis.Builder()
+                    .setTargetRotation(rotation)
+                    .setTargetResolution(analysisSize)
+                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .build()
+                analysis = localAnalysis
 
-                var cameraBitmap: Bitmap? = null
-                var output: Bitmap? = null
-                try {
-                    val frameBitmap = proxyToDisplayBitmap(proxy, front)
-                    cameraBitmap = frameBitmap
+                localAnalysis.setAnalyzer(renderWorker) { proxy ->
+                    if (!active.get()) {
+                        proxy.close()
+                        return@setAnalyzer
+                    }
 
-                    // MediaPipe no longer blocks the render loop. At most one inference is in flight;
-                    // when it finishes, the latest normalized landmarks atomically replace the old
-                    // ones. KEEP_ONLY_LATEST plus this busy gate means there is never a stale queue.
-                    if (needsTracking && trackingBusy.compareAndSet(false, true)) {
-                        val trackingInput = frameBitmap.copy(Bitmap.Config.ARGB_8888, false)
-                        if (trackingInput == null) {
-                            trackingBusy.set(false)
+                    // The performance control changes only this deadline. Resolution, model, landmark
+                    // count and all visual semantics stay identical at LOW, MEDIUM and MAX.
+                    if (!framePacer.shouldProcess(System.nanoTime())) {
+                        proxy.close()
+                        return@setAnalyzer
+                    }
+
+                    var cameraBitmap: Bitmap? = null
+                    var output: Bitmap? = null
+                    try {
+                        val frameBitmap = proxyToDisplayBitmap(proxy, front)
+                        cameraBitmap = frameBitmap
+
+                        // MediaPipe no longer blocks the render loop. At most one inference is in flight;
+                        // when it finishes, the latest normalized landmarks atomically replace the old
+                        // ones. KEEP_ONLY_LATEST plus this busy gate means there is never a stale queue.
+                        if (needsTracking && trackingBusy.compareAndSet(false, true)) {
+                            val trackingInput = frameBitmap.copy(Bitmap.Config.ARGB_8888, false)
+                            if (trackingInput == null) {
+                                trackingBusy.set(false)
+                            } else {
+                                trackerWorker.execute {
+                                    try {
+                                        latestTracking.set(tracker.detect(trackingInput, mode))
+                                    } catch (t: Throwable) {
+                                        showError("MediaPipe ${mode.name.lowercase()} tracking could not run", t)
+                                    } finally {
+                                        if (!trackingInput.isRecycled) trackingInput.recycle()
+                                        trackingBusy.set(false)
+                                    }
+                                }
+                            }
+                        }
+
+                        val tracking = if (needsTracking) {
+                            val newest = latestTracking.get()
+                            smoothTrackingFrame(
+                                previous = smoothedTracking,
+                                target = newest,
+                                alpha = TRACKING_SMOOTHING_ALPHA
+                            ).also { smoothedTracking = it }
                         } else {
-                            trackerWorker.execute {
+                            TrackingFrame(mode, emptyList(), System.currentTimeMillis())
+                        }
+
+                        // The bundled Face/Hand/Body examples use a native Canvas fast path.
+                        val bundledOverlay = if (!program.usesPixels && needsTracking) {
+                            renderBundledTrackingOverlay(
+                                code = code,
+                                mode = mode,
+                                frame = tracking,
+                                width = frameBitmap.width,
+                                height = frameBitmap.height
+                            )
+                        } else null
+
+                        // Keep the exact tracked-eye kernel on its tight native loop. The generic
+                        // bytecode compiler remains the path for arbitrary numeric pixel programs.
+                        val optimizedTrackedPixels = if (program.usesPixels && needsTracking) {
+                            renderOptimizedTrackedPixelOverlay(
+                                code = code,
+                                mode = mode,
+                                frame = tracking,
+                                source = frameBitmap
+                            )
+                        } else null
+
+                        val bytecodePixels = if (optimizedTrackedPixels == null && compiledPixelProgram != null) {
+                            compiledPixelProgram.render(frameBitmap, tracking, latestValues.get()).also {
+                                makeDifferenceOverlay(frameBitmap, it)
+                            }
+                        } else null
+
+                        output = bundledOverlay ?: optimizedTrackedPixels ?: bytecodePixels ?: if (program.usesPixels) {
+                            engine.render(frameBitmap, tracking, program, latestValues.get()).also {
+                                makeDifferenceOverlay(frameBitmap, it)
+                            }
+                        } else {
+                            engine.renderOverlay(frameBitmap, tracking, program, latestValues.get())
+                        }
+
+                        val frameToPost = output
+                        if (active.get() && frameToPost != null && uiFramePending.compareAndSet(false, true)) {
+                            mainExecutor.execute {
                                 try {
-                                    latestTracking.set(tracker.detect(trackingInput, mode))
-                                } catch (t: Throwable) {
-                                    showError("MediaPipe ${mode.name.lowercase()} tracking could not run", t)
+                                    if (active.get() && !frameToPost.isRecycled) {
+                                        val old = displayed
+                                        effectView.setImageBitmap(frameToPost)
+                                        effectView.visibility = View.VISIBLE
+                                        displayed = frameToPost
+                                        if (old != null && old !== frameToPost && !old.isRecycled) old.recycle()
+                                    } else if (!frameToPost.isRecycled) {
+                                        frameToPost.recycle()
+                                    }
                                 } finally {
-                                    if (!trackingInput.isRecycled) trackingInput.recycle()
-                                    trackingBusy.set(false)
+                                    uiFramePending.set(false)
                                 }
                             }
+                            output = null
                         }
+                        clearError()
+                    } catch (t: Throwable) {
+                        showError("Filter runtime error", t)
+                    } finally {
+                        output?.let { if (!it.isRecycled) it.recycle() }
+                        cameraBitmap?.let { if (!it.isRecycled) it.recycle() }
+                        proxy.close()
                     }
+                }
 
-                    val tracking = if (needsTracking) {
-                        val newest = latestTracking.get()
-                        smoothTrackingFrame(
-                            previous = smoothedTracking,
-                            target = newest,
-                            alpha = TRACKING_SMOOTHING_ALPHA
-                        ).also { smoothedTracking = it }
-                    } else {
-                        TrackingFrame(mode, emptyList(), System.currentTimeMillis())
-                    }
-
-                    // The bundled Face/Hand/Body examples use a native Canvas fast path.
-                    val bundledOverlay = if (!program.usesPixels && needsTracking) {
-                        renderBundledTrackingOverlay(
-                            code = code,
-                            mode = mode,
-                            frame = tracking,
-                            width = frameBitmap.width,
-                            height = frameBitmap.height
-                        )
-                    } else null
-
-                    // Keep the exact tracked-eye kernel on its tight native loop. The generic
-                    // bytecode compiler remains the path for arbitrary numeric pixel programs.
-                    val optimizedTrackedPixels = if (program.usesPixels && needsTracking) {
-                        renderOptimizedTrackedPixelOverlay(
-                            code = code,
-                            mode = mode,
-                            frame = tracking,
-                            source = frameBitmap
-                        )
-                    } else null
-
-                    val bytecodePixels = if (optimizedTrackedPixels == null && compiledPixelProgram != null) {
-                        compiledPixelProgram.render(frameBitmap, tracking, latestValues.get()).also {
-                            makeDifferenceOverlay(frameBitmap, it)
-                        }
-                    } else null
-
-                    output = bundledOverlay ?: optimizedTrackedPixels ?: bytecodePixels ?: if (program.usesPixels) {
-                        engine.render(frameBitmap, tracking, program, latestValues.get()).also {
-                            makeDifferenceOverlay(frameBitmap, it)
-                        }
-                    } else {
-                        engine.renderOverlay(frameBitmap, tracking, program, latestValues.get())
-                    }
-
-                    val frameToPost = output
-                    if (active.get() && frameToPost != null && uiFramePending.compareAndSet(false, true)) {
-                        mainExecutor.execute {
-                            try {
-                                if (active.get() && !frameToPost.isRecycled) {
-                                    val old = displayed
-                                    effectView.setImageBitmap(frameToPost)
-                                    effectView.visibility = View.VISIBLE
-                                    displayed = frameToPost
-                                    if (old != null && old !== frameToPost && !old.isRecycled) old.recycle()
-                                } else if (!frameToPost.isRecycled) {
-                                    frameToPost.recycle()
-                                }
-                            } finally {
-                                uiFramePending.set(false)
-                            }
-                        }
-                        output = null
-                    }
+                try {
+                    cameraProvider.unbindAll()
+                    val camera = cameraProvider.bindToLifecycle(
+                        lifecycle,
+                        if (front) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA,
+                        UseCaseGroup.Builder()
+                            .setViewPort(requireNotNull(previewView.viewPort))
+                            .addUseCase(preview)
+                            .addUseCase(localAnalysis)
+                            .build()
+                    )
+                    // Let auto-exposure slow the sensor in dim light. A fixed 60 FPS request limits
+                    // exposure to roughly 1/60 s and can leave the front camera dark and noisy.
+                    // The performance button remains an engine ceiling, not a sensor FPS guarantee.
+                    requestBestSourceFps(camera, 60)
                     clearError()
                 } catch (t: Throwable) {
-                    showError("Filter runtime error", t)
-                } finally {
-                    output?.let { if (!it.isRecycled) it.recycle() }
-                    cameraBitmap?.let { if (!it.isRecycled) it.recycle() }
-                    proxy.close()
+                    showError("Camera bind failed", t)
                 }
-            }
-
-            try {
-                cameraProvider.unbindAll()
-                val camera = cameraProvider.bindToLifecycle(
-                    lifecycle,
-                    if (front) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA,
-                    preview,
-                    localAnalysis
-                )
-                // Let auto-exposure slow the sensor in dim light. A fixed 60 FPS request limits
-                // exposure to roughly 1/60 s and can leave the front camera dark and noisy.
-                // The performance button remains an engine ceiling, not a sensor FPS guarantee.
-                requestBestSourceFps(camera, 60)
-                clearError()
-            } catch (t: Throwable) {
-                showError("Camera bind failed", t)
             }
         }, mainExecutor)
 
@@ -442,7 +450,10 @@ private fun programHasGlobalPixels(program: ScriptEngine.Program): Boolean =
 
 private fun containsGlobalPixels(statements: List<ScriptEngine.Statement>): Boolean = statements.any { statement ->
     when (statement) {
-        is ScriptEngine.Pixels -> statement.x == null
+        is ScriptEngine.Pixels -> statement.x == null || (
+            statement.x.toDoubleOrNull() == 0.0 && statement.y?.toDoubleOrNull() == 0.0 &&
+                statement.width?.toDoubleOrNull() == 1.0 && statement.height?.toDoubleOrNull() == 1.0
+            )
         is ScriptEngine.Repeat -> containsGlobalPixels(statement.body)
         is ScriptEngine.If -> containsGlobalPixels(statement.yes) || containsGlobalPixels(statement.no)
         else -> false

@@ -1,7 +1,6 @@
 package com.pugplayz.facechanger
 
 import android.graphics.Bitmap
-import android.graphics.Color
 import kotlin.math.*
 
 /**
@@ -34,6 +33,20 @@ internal class PixelBytecodeProgram internal constructor(
         val count = width * height
         val sourcePixels = IntArray(count)
         source.getPixels(sourcePixels, 0, width, 0, 0, width, height)
+        val outputPixels = renderPixels(sourcePixels, width, height, frame, values)
+        return Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also {
+            it.setPixels(outputPixels, 0, width, 0, 0, width, height)
+        }
+    }
+
+    internal val usesColorLookup: Boolean = (topLevel.singleOrNull() as? VmPixels)
+        ?.let { supportsColorLookup(it.body, specialSlots, slotCount, inputSlots) } == true
+
+    internal fun renderPixels(
+        sourcePixels: IntArray, width: Int, height: Int, frame: TrackingFrame,
+        values: Map<String, String>, optimize: Boolean = true
+    ): IntArray {
+        require(width > 0 && height > 0 && sourcePixels.size == width * height)
         val outputPixels = sourcePixels.copyOf()
 
         val vars = DoubleArray(slotCount)
@@ -58,11 +71,11 @@ internal class PixelBytecodeProgram internal constructor(
             specialSlots = specialSlots,
             functions = functions
         )
+        context.colorLookup = if (optimize && usesColorLookup) {
+            buildColorLookup((topLevel.single() as VmPixels).body, context)
+        } else null
         executeBlock(topLevel, context, pixelActive = false, callDepth = 0)
-
-        return Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also {
-            it.setPixels(outputPixels, 0, width, 0, 0, width, height)
-        }
+        return outputPixels
     }
 }
 
@@ -210,8 +223,11 @@ private class VmContext(
     val functions: Map<String, VmFunction>
 ) {
     var pixelVisits = 0
+    var sampleOverride: Int? = null
+    var colorLookup: IntArray? = null
 
     fun sample(x: Double, y: Double): Int {
+        sampleOverride?.let { return it }
         val ix = (x.coerceIn(0.0, 1.0) * (width - 1)).roundToInt().coerceIn(0, width - 1)
         val iy = (y.coerceIn(0.0, 1.0) * (height - 1)).roundToInt().coerceIn(0, height - 1)
         return sourcePixels[iy * width + ix]
@@ -330,6 +346,23 @@ private fun executePixels(instruction: VmPixels, context: VmContext, callDepth: 
     val top = floor(y0n * context.height).toInt().coerceIn(0, context.height)
     val bottom = ceil(y1n * context.height).toInt().coerceIn(0, context.height)
 
+    val lut = context.colorLookup
+    if (lut != null) {
+        context.pixelVisits += (right - left) * (bottom - top)
+        require(context.pixelVisits <= MAX_PIXEL_VISITS_VM) { "Pixel visit budget exceeded" }
+        for (iy in top until bottom) {
+            for (ix in left until right) {
+                val index = iy * context.width + ix
+                val pixel = context.sourcePixels[index]
+                context.outputPixels[index] =
+                    (lut[pixel ushr 24] and -0x1000000) or
+                    (lut[(pixel ushr 16) and 255] and 0x00ff0000) or
+                    (lut[(pixel ushr 8) and 255] and 0x0000ff00) or
+                    (lut[pixel and 255] and 0x000000ff)
+            }
+        }
+        return
+    }
     val s = context.specialSlots
     val saved = doubleArrayOf(
         context.vars[s.x], context.vars[s.y], context.vars[s.ix], context.vars[s.iy],
@@ -348,10 +381,10 @@ private fun executePixels(instruction: VmPixels, context: VmContext, callDepth: 
                 context.vars[s.iy] = iy.toDouble()
                 context.vars[s.x] = if (context.width <= 1) 0.0 else ix.toDouble() / (context.width - 1).toDouble()
                 context.vars[s.y] = yNorm
-                context.vars[s.r] = Color.red(current) / 255.0
-                context.vars[s.g] = Color.green(current) / 255.0
-                context.vars[s.b] = Color.blue(current) / 255.0
-                context.vars[s.a] = Color.alpha(current) / 255.0
+                context.vars[s.r] = pixelRed(current) / 255.0
+                context.vars[s.g] = pixelGreen(current) / 255.0
+                context.vars[s.b] = pixelBlue(current) / 255.0
+                context.vars[s.a] = pixelAlpha(current) / 255.0
 
                 executeBlock(instruction.body, context, pixelActive = true, callDepth = callDepth)
 
@@ -372,7 +405,7 @@ private fun executePixels(instruction: VmPixels, context: VmContext, callDepth: 
     }
 }
 
-private fun vmColor(r: Double, g: Double, b: Double, a: Double): Int = Color.argb(
+private fun vmColor(r: Double, g: Double, b: Double, a: Double): Int = packColor(
     (a.coerceIn(0.0, 1.0) * 255.0).roundToInt(),
     (r.coerceIn(0.0, 1.0) * 255.0).roundToInt(),
     (g.coerceIn(0.0, 1.0) * 255.0).roundToInt(),
@@ -692,10 +725,10 @@ private fun callBuiltin(builtin: Builtin, s: DoubleArray, base: Int, argc: Int, 
         Builtin.GROUP_HEIGHT -> c.bounds(arg(0))?.let { it.maxY - it.minY } ?: 0.0
         Builtin.GROUP_CENTER_X -> c.bounds(arg(0))?.let { (it.minX + it.maxX) * 0.5 } ?: 0.0
         Builtin.GROUP_CENTER_Y -> c.bounds(arg(0))?.let { (it.minY + it.maxY) * 0.5 } ?: 0.0
-        Builtin.SAMPLE_R -> Color.red(c.sample(arg(0), arg(1))) / 255.0
-        Builtin.SAMPLE_G -> Color.green(c.sample(arg(0), arg(1))) / 255.0
-        Builtin.SAMPLE_B -> Color.blue(c.sample(arg(0), arg(1))) / 255.0
-        Builtin.SAMPLE_A -> Color.alpha(c.sample(arg(0), arg(1))) / 255.0
+        Builtin.SAMPLE_R -> pixelRed(c.sample(arg(0), arg(1))) / 255.0
+        Builtin.SAMPLE_G -> pixelGreen(c.sample(arg(0), arg(1))) / 255.0
+        Builtin.SAMPLE_B -> pixelBlue(c.sample(arg(0), arg(1))) / 255.0
+        Builtin.SAMPLE_A -> pixelAlpha(c.sample(arg(0), arg(1))) / 255.0
     }
 }
 
@@ -717,3 +750,89 @@ private const val MAX_CALL_DEPTH = 8
 private const val MAX_CALL_ARGS = 16
 private const val MAX_REPEAT_VM = 10_000
 private const val MAX_PIXEL_VISITS_VM = 2_000_000
+
+private fun pixelRed(c: Int) = (c ushr 16) and 255
+private fun pixelGreen(c: Int) = (c ushr 8) and 255
+private fun pixelBlue(c: Int) = c and 255
+private fun pixelAlpha(c: Int) = c ushr 24
+private fun packColor(a: Int, r: Int, g: Int, b: Int) =
+    (a shl 24) or (r shl 16) or (g shl 8) or b
+
+/** Prove each output channel depends only on its own source channel and frame constants.
+ * Reject coordinates, cross-channel mixing, loop-carried variables and control flow.
+ * Unsupported scripts retain the normal VM, with no sampling/resolution changes.
+ */
+private fun supportsColorLookup(
+    body: List<VmInstruction>, special: SpecialSlots, slotCount: Int, inputs: List<InputSlot>
+): Boolean {
+    val unknown = 16
+    val deps = IntArray(slotCount) { unknown }
+    inputs.forEach { deps[it.slot] = 0 }
+    deps[special.imageWidth] = 0
+    deps[special.imageHeight] = 0
+    deps[special.aspect] = 0
+    listOf(special.x, special.y, special.ix, special.iy, special.loop).forEach { deps[it] = unknown }
+    val channels = listOf(special.r, special.g, special.b, special.a)
+    channels.forEachIndexed { index, slot -> deps[slot] = 1 shl index }
+
+    fun dependency(code: ExprCode): Int {
+        // Only an exact sample_channel(x,y) may reference coordinates.
+        if (code.words.size == 3 && code.words[0] == (ExprOp.SLOT shl 24 or special.x) &&
+            code.words[1] == (ExprOp.SLOT shl 24 or special.y) &&
+            code.words[2] ushr 24 == ExprOp.CALL) {
+            val call = code.calls[code.words[2] and 0x00ffffff]
+            val channel = listOf(Builtin.SAMPLE_R, Builtin.SAMPLE_G, Builtin.SAMPLE_B, Builtin.SAMPLE_A)
+                .indexOf(call.builtin)
+            if (channel >= 0 && call.argc == 2) return 1 shl channel
+        }
+        var result = 0
+        for (word in code.words) {
+            val operand = word and 0x00ffffff
+            when (word ushr 24) {
+                ExprOp.SLOT -> result = result or deps[operand]
+                ExprOp.CALL -> if (code.calls[operand].builtin.ordinal >= Builtin.LANDMARK_COUNT.ordinal) return unknown
+            }
+        }
+        return result
+    }
+    for (instruction in body) {
+        when (instruction) {
+            is VmStore -> {
+                // Writing reserved variables or inputs changes subsequent pixel semantics.
+                if (instruction.slot in channels || instruction.slot <= special.a ||
+                    inputs.any { it.slot == instruction.slot }) return false
+                val d = dependency(instruction.expression)
+                if (d and unknown != 0) return false
+                deps[instruction.slot] = d
+            }
+            is VmSetChannel -> {
+                val d = dependency(instruction.expression)
+                if (d and unknown != 0) return false
+                deps[instruction.slot] = d
+            }
+            else -> return false
+        }
+    }
+    return channels.withIndex().all { (index, slot) -> deps[slot] and (1 shl index).inv() == 0 }
+}
+
+private fun buildColorLookup(body: List<VmInstruction>, context: VmContext): IntArray {
+    val saved = context.vars.copyOf()
+    val s = context.specialSlots
+    return try {
+        IntArray(256) { value ->
+            saved.copyInto(context.vars)
+            val normalized = value / 255.0
+            context.vars[s.r] = normalized
+            context.vars[s.g] = normalized
+            context.vars[s.b] = normalized
+            context.vars[s.a] = normalized
+            context.sampleOverride = packColor(value, value, value, value)
+            executeBlock(body, context, pixelActive = true, callDepth = 0)
+            vmColor(context.vars[s.r], context.vars[s.g], context.vars[s.b], context.vars[s.a])
+        }
+    } finally {
+        saved.copyInto(context.vars)
+        context.sampleOverride = null
+    }
+}

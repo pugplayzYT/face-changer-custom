@@ -25,9 +25,10 @@ When a filter is applied, supported numeric pixel programs compile once into the
 - Variables use numeric array slots instead of string maps.
 - Expressions compile to stack bytecode.
 - Pixel loops avoid per-pixel parsing and string conversion.
+- A single straight-line pixel block whose output channels depend only on their own source channels and frame constants uses exact 256-entry colour lookup tables. This accelerates invert, channel brightness, and similar colour math without skipping pixels. Coordinate-dependent effects, channel mixing, and control flow retain normal execution.
 - Unsupported language features safely fall back to the compatibility interpreter.
 
-This keeps the language sandboxed while avoiding the enormous overhead of interpreting source text for every camera pixel.
+This keeps the language sandboxed while avoiding the enormous overhead of interpreting source text for every camera pixel. Larger regions still touch more pixels, and complex scripts can still take longer; the lookup path removes repeated expression evaluation for compatible colour scripts.
 
 ## Inputs
 
@@ -135,6 +136,8 @@ Channel values are clamped to 0..1.
 A pixel block can be restricted to a normalized rectangle:
 
 `pixels X Y WIDTH HEIGHT`
+
+`pixels 0 0 1 1` and bare `pixels` cover the complete visible camera frame, including its last row and column. The preview fills the camera surface with a shared centre crop; coordinates describe that visible crop, not the uncropped sensor or the app controls.
 
 Example:
 
