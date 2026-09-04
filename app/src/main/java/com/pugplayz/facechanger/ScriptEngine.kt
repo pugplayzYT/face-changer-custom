@@ -1,521 +1,591 @@
 package com.pugplayz.facechanger
 
 import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.Paint
-import android.graphics.Rect
-import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
+import kotlin.math.ceil
+import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
-import kotlin.math.sqrt
+import kotlin.math.roundToInt
 
 /**
- * Host-controlled filter language. It exposes only approved drawing/pixel operations and
- * MediaPipe landmark values: no files, sockets, reflection, Android APIs, processes or shell.
+ * Small capability-based filter language.
+ *
+ * The engine deliberately contains no named visual effects. Scripts get only the essentials:
+ * variables, functions, conditions, bounded loops, pixel iteration/writes, source sampling,
+ * user inputs, math and MediaPipe tracking values. Effects such as invert, grayscale, bulge,
+ * blur, outlines and eye enlargement are written in the language itself.
  */
 class ScriptEngine {
-    data class Program(val inputs: List<ScriptInput>, val statements: List<Statement>)
+    data class Program(
+        val inputs: List<ScriptInput>,
+        val statements: List<Statement>,
+        val functions: Map<String, UserFunction>,
+        /** Pixel loops replace the whole analyzed frame; non-pixel scripts can stay overlays. */
+        val usesPixels: Boolean
+    )
+
+    data class UserFunction(
+        val name: String,
+        val parameters: List<String>,
+        val body: List<Statement>
+    )
+
     sealed interface Statement
     data class Let(val name: String, val expression: String) : Statement
-    data class Skeleton(val color: Int, val widthExpr: String) : Statement
-    data class Connections(val color: Int, val widthExpr: String) : Statement
-    data class Dots(val color: Int, val radiusExpr: String) : Statement
-    data class Magnify(val groupExpr: String, val pointExpr: String, val scaleExpr: String, val radiusExpr: String) : Statement
-    data class Bulge(val xExpr: String, val yExpr: String, val scaleExpr: String, val radiusExpr: String) : Statement
-    data class Pixelate(val sizeExpr: String) : Statement
-    data class Tint(val color: Int, val amountExpr: String) : Statement
-    data class Circle(val xExpr: String, val yExpr: String, val radiusExpr: String, val color: Int, val fill: Boolean) : Statement
-    data class Line(val x1: String, val y1: String, val x2: String, val y2: String, val color: Int, val widthExpr: String) : Statement
-    data class RectDraw(val x: String, val y: String, val w: String, val h: String, val color: Int, val fill: Boolean) : Statement
-    data class TextDraw(val value: String, val x: String, val y: String, val size: String, val color: Int) : Statement
-    data class Repeat(val countExpr: String, val body: List<Statement>) : Statement
+    data class SetChannel(val channel: String, val expression: String) : Statement
+    data class WritePixel(
+        val x: String,
+        val y: String,
+        val r: String,
+        val g: String,
+        val b: String,
+        val a: String
+    ) : Statement
+    data class Pixels(
+        val x: String?,
+        val y: String?,
+        val width: String?,
+        val height: String?,
+        val body: List<Statement>
+    ) : Statement
+    data class Repeat(val countExpression: String, val body: List<Statement>) : Statement
     data class If(val expression: String, val yes: List<Statement>, val no: List<Statement>) : Statement
+    data class Call(val name: String, val arguments: List<String>) : Statement
 
-    private val counter = AtomicLong(0)
+    private var frameCounter = 0L
     private val startedNanos = System.nanoTime()
 
     fun parse(source: String): Program {
-        val lines = source.lines().map { it.substringBefore("# ").trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }
+        require(source.length <= MAX_SCRIPT_CHARS) { "Script is too large (max $MAX_SCRIPT_CHARS characters)" }
+
+        val lines = source.lines()
+            .map { it.substringBefore("//").trim() }
+            .filter { it.isNotEmpty() && !it.startsWith("#") }
+
         val inputs = mutableListOf<ScriptInput>()
-        val bodyLines = mutableListOf<String>()
-        for (line in lines) {
-            if (line.startsWith("input ")) inputs += parseInput(line) else bodyLines += line
+        val functions = linkedMapOf<String, UserFunction>()
+        val topLevelLines = mutableListOf<String>()
+
+        var index = 0
+        while (index < lines.size) {
+            val line = lines[index]
+            when {
+                line.startsWith("input ") -> inputs += parseInput(line)
+                line.startsWith("fn ") -> {
+                    require(functions.size < MAX_FUNCTIONS) { "Too many functions (max $MAX_FUNCTIONS)" }
+                    val parts = line.split(Regex("\\s+"))
+                    require(parts.size >= 2) { "fn syntax: fn NAME [PARAM ...]" }
+                    val name = identifier(parts[1])
+                    val parameters = parts.drop(2).map(::identifier)
+                    require(parameters.distinct().size == parameters.size) { "Duplicate parameter in $name" }
+                    require(parameters.size <= MAX_FUNCTION_PARAMETERS) { "Too many parameters in $name" }
+                    require(name !in functions) { "Function '$name' is already defined" }
+
+                    val parsed = parseBlock(lines, index + 1, setOf("end"))
+                    require(parsed.second < lines.size && lines[parsed.second] == "end") { "fn $name missing end" }
+                    functions[name] = UserFunction(name, parameters, parsed.first)
+                    index = parsed.second
+                }
+                else -> topLevelLines += line
+            }
+            index++
         }
-        return Program(inputs, parseBlock(bodyLines, 0, emptySet()).first)
+
+        val parsedTop = parseBlock(topLevelLines, 0, emptySet())
+        require(parsedTop.second == topLevelLines.size) { "Unexpected block terminator" }
+
+        val statementCount = countStatements(parsedTop.first) + functions.values.sumOf { countStatements(it.body) }
+        require(statementCount <= MAX_STATEMENTS) { "Too many statements (max $MAX_STATEMENTS)" }
+
+        val usesPixels = containsPixels(parsedTop.first) || functions.values.any { containsPixels(it.body) }
+        return Program(inputs, parsedTop.first, functions.toMap(), usesPixels)
     }
 
     private fun parseInput(line: String): ScriptInput {
-        val p = line.split(Regex("\\s+"))
-        require(p.size >= 5) { "input syntax: input number|text name label default [min max]" }
-        val type = when (p[1]) {
+        val parts = line.split(Regex("\\s+"))
+        require(parts.size >= 5) { "input syntax: input number|text NAME LABEL DEFAULT [MIN MAX]" }
+        val type = when (parts[1]) {
             "number" -> InputType.NUMBER
             "text" -> InputType.TEXT
             else -> error("input type must be number or text")
         }
         return ScriptInput(
-            name = p[2],
-            label = p[3].replace('_', ' '),
+            name = identifier(parts[2]),
+            label = parts[3].replace('_', ' '),
             type = type,
-            defaultValue = p[4].replace('_', ' '),
-            min = p.getOrNull(5)?.toDoubleOrNull(),
-            max = p.getOrNull(6)?.toDoubleOrNull()
+            defaultValue = parts[4].replace('_', ' '),
+            min = parts.getOrNull(5)?.toDoubleOrNull(),
+            max = parts.getOrNull(6)?.toDoubleOrNull()
         )
     }
 
-    private fun parseBlock(lines: List<String>, start: Int, stops: Set<String>): Pair<List<Statement>, Int> {
+    private fun parseBlock(
+        lines: List<String>,
+        start: Int,
+        stops: Set<String>
+    ): Pair<List<Statement>, Int> {
         val out = mutableListOf<Statement>()
-        var i = start
-        while (i < lines.size) {
-            val line = lines[i]
+        var index = start
+
+        while (index < lines.size) {
+            val line = lines[index]
             if (line in stops) break
-            val p = line.split(Regex("\\s+"))
-            when (p[0]) {
+            val parts = line.split(Regex("\\s+"))
+
+            when (parts[0]) {
                 "let" -> {
-                    require(p.size >= 3) { "let syntax: let name = expression" }
-                    val name = p[1]
-                    val expr = line.substringAfter(name).trim().removePrefix("=").trim()
-                    require(expr.isNotEmpty()) { "let requires an expression" }
-                    out += Let(name, expr)
+                    require(parts.size >= 3) { "let syntax: let NAME = EXPRESSION" }
+                    val name = identifier(parts[1])
+                    val expression = line.substringAfter(parts[1]).trim().removePrefix("=").trim()
+                    require(expression.isNotEmpty()) { "let requires an expression" }
+                    out += Let(name, expression)
                 }
-                "skeleton" -> out += Skeleton(parseColor(p[1]), p.getOrElse(2) { "3" })
-                "connections" -> out += Connections(parseColor(p[1]), p.getOrElse(2) { "3" })
-                "dots" -> out += Dots(parseColor(p[1]), p.getOrElse(2) { "5" })
-                "magnify" -> {
-                    require(p.size >= 5) { "magnify syntax: magnify GROUP POINT SCALE RADIUS" }
-                    out += Magnify(p[1], p[2], p[3], p[4])
+
+                "set" -> {
+                    require(parts.size >= 3) { "set syntax inside pixels: set r|g|b|a EXPRESSION" }
+                    val channel = parts[1].lowercase()
+                    require(channel in CHANNELS) { "set can only write r, g, b or a" }
+                    out += SetChannel(channel, line.substringAfter(parts[1]).trim())
                 }
-                "bulge" -> {
-                    require(p.size >= 5) { "bulge syntax: bulge X Y SCALE RADIUS" }
-                    out += Bulge(p[1], p[2], p[3], p[4])
+
+                "write_pixel" -> {
+                    require(parts.size == 7) { "write_pixel syntax: write_pixel X Y R G B A" }
+                    out += WritePixel(parts[1], parts[2], parts[3], parts[4], parts[5], parts[6])
                 }
-                "pixelate" -> out += Pixelate(p[1])
-                "tint" -> out += Tint(parseColor(p[1]), p[2])
-                "circle" -> {
-                    require(p.size >= 5)
-                    out += Circle(p[1], p[2], p[3], parseColor(p[4]), p.getOrNull(5) != "stroke")
+
+                "pixels" -> {
+                    require(parts.size == 1 || parts.size == 5) {
+                        "pixels syntax: pixels  OR  pixels X Y WIDTH HEIGHT"
+                    }
+                    val parsed = parseBlock(lines, index + 1, setOf("end"))
+                    require(parsed.second < lines.size && lines[parsed.second] == "end") { "pixels missing end" }
+                    out += if (parts.size == 1) {
+                        Pixels(null, null, null, null, parsed.first)
+                    } else {
+                        Pixels(parts[1], parts[2], parts[3], parts[4], parsed.first)
+                    }
+                    index = parsed.second
                 }
-                "line" -> {
-                    require(p.size >= 6)
-                    out += Line(p[1], p[2], p[3], p[4], parseColor(p[5]), p.getOrElse(6) { "3" })
-                }
-                "rect" -> {
-                    require(p.size >= 6)
-                    out += RectDraw(p[1], p[2], p[3], p[4], parseColor(p[5]), p.getOrNull(6) != "stroke")
-                }
-                "text" -> {
-                    require(p.size >= 6)
-                    out += TextDraw(p[1], p[2], p[3], p[4], parseColor(p[5]))
-                }
+
                 "repeat" -> {
-                    val (child, end) = parseBlock(lines, i + 1, setOf("end"))
-                    require(end < lines.size && lines[end] == "end") { "repeat missing end" }
-                    out += Repeat(line.removePrefix("repeat ").trim(), child)
-                    i = end
+                    val count = line.removePrefix("repeat").trim()
+                    require(count.isNotEmpty()) { "repeat requires a count expression" }
+                    val parsed = parseBlock(lines, index + 1, setOf("end"))
+                    require(parsed.second < lines.size && lines[parsed.second] == "end") { "repeat missing end" }
+                    out += Repeat(count, parsed.first)
+                    index = parsed.second
                 }
+
                 "if" -> {
-                    val (yes, split) = parseBlock(lines, i + 1, setOf("else", "end"))
+                    val expression = line.removePrefix("if").trim()
+                    require(expression.isNotEmpty()) { "if requires an expression" }
+                    val yesParsed = parseBlock(lines, index + 1, setOf("else", "end"))
                     var no = emptyList<Statement>()
-                    var end = split
-                    if (split < lines.size && lines[split] == "else") {
-                        val parsed = parseBlock(lines, split + 1, setOf("end"))
-                        no = parsed.first
-                        end = parsed.second
+                    var end = yesParsed.second
+                    if (end < lines.size && lines[end] == "else") {
+                        val noParsed = parseBlock(lines, end + 1, setOf("end"))
+                        no = noParsed.first
+                        end = noParsed.second
                     }
                     require(end < lines.size && lines[end] == "end") { "if missing end" }
-                    out += If(line.removePrefix("if "), yes, no)
-                    i = end
+                    out += If(expression, yesParsed.first, no)
+                    index = end
                 }
-                else -> error("Unknown command: ${p[0]}")
+
+                "call" -> {
+                    require(parts.size >= 2) { "call syntax: call FUNCTION [ARG ...]" }
+                    out += Call(identifier(parts[1]), parts.drop(2))
+                }
+
+                "input", "fn" -> error("${parts[0]} is only allowed at top level")
+                "else", "end" -> error("Unexpected '${parts[0]}'")
+                else -> {
+                    if (parts[0] in REMOVED_EFFECT_COMMANDS) {
+                        error("'${parts[0]}' was removed. Build the effect from pixels, set, sample_* and functions.")
+                    }
+                    error("Unknown command: ${parts[0]}")
+                }
             }
-            i++
+            index++
         }
-        return out to i
+
+        return out to index
     }
 
-    fun render(source: Bitmap, frame: TrackingFrame, program: Program, values: Map<String, String>): Bitmap {
-        val output = source.copy(Bitmap.Config.ARGB_8888, true)
-        runProgram(source, output, frame, program, values)
-        return output
-    }
+    fun render(
+        source: Bitmap,
+        frame: TrackingFrame,
+        program: Program,
+        values: Map<String, String>
+    ): Bitmap = renderInternal(source, frame, program, values, overlay = false)
 
-    /**
-     * Render only local/drawing effects into a transparent bitmap. CameraPipeline uses this for
-     * bulge/magnify/drawing filters so the native CameraX preview stays visible and smooth.
-     */
-    fun renderOverlay(source: Bitmap, frame: TrackingFrame, program: Program, values: Map<String, String>): Bitmap {
-        val output = Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
-        output.eraseColor(Color.TRANSPARENT)
-        runProgram(source, output, frame, program, values)
-        return output
-    }
+    fun renderOverlay(
+        source: Bitmap,
+        frame: TrackingFrame,
+        program: Program,
+        values: Map<String, String>
+    ): Bitmap = renderInternal(source, frame, program, values, overlay = true)
 
-    private fun runProgram(source: Bitmap, output: Bitmap, frame: TrackingFrame, program: Program, values: Map<String, String>) {
-        val vars = program.inputs.associate { it.name to (values[it.name] ?: it.defaultValue) }.toMutableMap()
-        val frameIndex = counter.getAndIncrement()
-        val elapsed = (System.nanoTime() - startedNanos) / 1_000_000_000.0
-        execute(source, output, frame, program.statements, vars, frameIndex, elapsed)
+    private fun renderInternal(
+        source: Bitmap,
+        frame: TrackingFrame,
+        program: Program,
+        values: Map<String, String>,
+        overlay: Boolean
+    ): Bitmap {
+        val width = source.width
+        val height = source.height
+        val sourcePixels = IntArray(width * height)
+        source.getPixels(sourcePixels, 0, width, 0, 0, width, height)
+        val outputPixels = if (overlay) IntArray(sourcePixels.size) else sourcePixels.copyOf()
+
+        val vars = program.inputs.associate { input ->
+            input.name to (values[input.name] ?: input.defaultValue)
+        }.toMutableMap()
+        vars["image_width"] = width.toString()
+        vars["image_height"] = height.toString()
+        vars["aspect"] = (width.toDouble() / max(1, height)).toString()
+
+        val sampler = SourceSampler(sourcePixels, width, height)
+        val state = ExecutionState(
+            program = program,
+            frame = frame,
+            frameIndex = frameCounter++,
+            elapsed = (System.nanoTime() - startedNanos) / 1_000_000_000.0,
+            width = width,
+            height = height,
+            sourcePixels = sourcePixels,
+            outputPixels = outputPixels,
+            sampler = sampler,
+            budget = ExecutionBudget()
+        )
+
+        execute(program.statements, vars, state, pixelActive = false, callDepth = 0)
+
+        return Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { result ->
+            result.setPixels(outputPixels, 0, width, 0, 0, width, height)
+        }
     }
 
     private fun execute(
-        source: Bitmap,
-        output: Bitmap,
-        frame: TrackingFrame,
         statements: List<Statement>,
         vars: MutableMap<String, String>,
-        frameIndex: Long,
-        elapsed: Double
+        state: ExecutionState,
+        pixelActive: Boolean,
+        callDepth: Int
     ) {
-        val canvas = Canvas(output)
-        fun n(expr: String) = ExpressionEvaluator(expr, vars, frame, frameIndex, elapsed).eval()
+        statements.forEach { statement ->
+            state.budget.operation()
+            fun number(expression: String): Double = eval(expression, vars, state)
 
-        statements.forEach { s ->
-            when (s) {
-                is Let -> vars[s.name] = n(s.expression).toString()
-                is Skeleton -> drawSkeleton(canvas, output, frame, s.color, n(s.widthExpr).toFloat())
-                is Connections -> drawConnections(canvas, output, frame, s.color, n(s.widthExpr).toFloat())
-                is Dots -> drawDots(canvas, output, frame, s.color, n(s.radiusExpr).toFloat())
-                is Magnify -> magnify(
-                    source,
-                    output,
-                    frame,
-                    n(s.groupExpr).toInt(),
-                    n(s.pointExpr).toInt(),
-                    n(s.scaleExpr),
-                    n(s.radiusExpr)
-                )
-                is Bulge -> bulge(
-                    source,
-                    output,
-                    n(s.xExpr),
-                    n(s.yExpr),
-                    n(s.scaleExpr),
-                    n(s.radiusExpr)
-                )
-                is Pixelate -> pixelate(output, max(2, n(s.sizeExpr).toInt()))
-                is Tint -> {
-                    val paint = Paint().apply {
-                        color = s.color
-                        alpha = (255 * n(s.amountExpr).coerceIn(0.0, 1.0)).toInt()
-                    }
-                    canvas.drawRect(0f, 0f, output.width.toFloat(), output.height.toFloat(), paint)
+            when (statement) {
+                is Let -> vars[statement.name] = number(statement.expression).toString()
+
+                is SetChannel -> {
+                    require(pixelActive) { "set r/g/b/a is only valid inside pixels" }
+                    vars[statement.channel] = number(statement.expression).coerceIn(0.0, 1.0).toString()
                 }
-                is Circle -> {
-                    val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                        color = s.color
-                        style = if (s.fill) Paint.Style.FILL else Paint.Style.STROKE
-                        strokeWidth = 3f
-                    }
-                    canvas.drawCircle(
-                        (n(s.xExpr) * output.width).toFloat(),
-                        (n(s.yExpr) * output.height).toFloat(),
-                        (n(s.radiusExpr) * min(output.width, output.height)).toFloat(),
-                        paint
+
+                is WritePixel -> {
+                    val x = number(statement.x).coerceIn(0.0, 1.0)
+                    val y = number(statement.y).coerceIn(0.0, 1.0)
+                    val ix = (x * (state.width - 1)).roundToInt().coerceIn(0, state.width - 1)
+                    val iy = (y * (state.height - 1)).roundToInt().coerceIn(0, state.height - 1)
+                    state.outputPixels[iy * state.width + ix] = color(
+                        number(statement.r), number(statement.g), number(statement.b), number(statement.a)
                     )
                 }
-                is Line -> {
-                    val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                        color = s.color
-                        style = Paint.Style.STROKE
-                        strokeWidth = n(s.widthExpr).toFloat().coerceAtLeast(0.5f)
-                    }
-                    canvas.drawLine(
-                        (n(s.x1) * output.width).toFloat(),
-                        (n(s.y1) * output.height).toFloat(),
-                        (n(s.x2) * output.width).toFloat(),
-                        (n(s.y2) * output.height).toFloat(),
-                        paint
-                    )
+
+                is Pixels -> {
+                    require(!pixelActive) { "pixels blocks cannot be nested" }
+                    executePixels(statement, vars, state, callDepth)
                 }
-                is RectDraw -> {
-                    val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                        color = s.color
-                        style = if (s.fill) Paint.Style.FILL else Paint.Style.STROKE
-                        strokeWidth = 3f
-                    }
-                    val x = (n(s.x) * output.width).toFloat()
-                    val y = (n(s.y) * output.height).toFloat()
-                    val w = (n(s.w) * output.width).toFloat()
-                    val h = (n(s.h) * output.height).toFloat()
-                    canvas.drawRect(x, y, x + w, y + h, paint)
-                }
-                is TextDraw -> {
-                    val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                        color = s.color
-                        textSize = n(s.size).toFloat().coerceAtLeast(6f)
-                    }
-                    canvas.drawText(
-                        resolveText(s.value, vars),
-                        (n(s.x) * output.width).toFloat(),
-                        (n(s.y) * output.height).toFloat(),
-                        paint
-                    )
-                }
+
                 is Repeat -> {
-                    val count = n(s.countExpr).toInt().coerceIn(0, 1000)
-                    val old = vars["loop"]
-                    repeat(count) { index ->
-                        vars["loop"] = index.toString()
-                        execute(source, output, frame, s.body, vars, frameIndex, elapsed)
+                    val count = number(statement.countExpression).toInt().coerceIn(0, MAX_REPEAT)
+                    val oldLoop = vars["loop"]
+                    repeat(count) { loopIndex ->
+                        vars["loop"] = loopIndex.toString()
+                        execute(statement.body, vars, state, pixelActive, callDepth)
                     }
-                    if (old == null) vars.remove("loop") else vars["loop"] = old
+                    restore(vars, "loop", oldLoop)
                 }
+
                 is If -> execute(
-                    source,
-                    output,
-                    frame,
-                    if (condition(s.expression, vars, frame, frameIndex, elapsed)) s.yes else s.no,
+                    if (condition(statement.expression, vars, state)) statement.yes else statement.no,
                     vars,
-                    frameIndex,
-                    elapsed
+                    state,
+                    pixelActive,
+                    callDepth
                 )
-            }
-        }
-    }
 
-    private fun drawDots(canvas: Canvas, bitmap: Bitmap, frame: TrackingFrame, color: Int, radius: Float) {
-        val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = color; style = Paint.Style.FILL }
-        frame.groups.flatten().forEach {
-            canvas.drawCircle(it.x * bitmap.width, it.y * bitmap.height, radius.coerceAtLeast(0.5f), p)
-        }
-    }
-
-    private fun drawSkeleton(canvas: Canvas, bitmap: Bitmap, frame: TrackingFrame, color: Int, width: Float) {
-        val p = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            this.color = color
-            strokeWidth = width.coerceAtLeast(0.5f)
-            style = Paint.Style.STROKE
-        }
-        frame.groups.forEach { group ->
-            group.zipWithNext().forEach { (a, b) ->
-                canvas.drawLine(a.x * bitmap.width, a.y * bitmap.height, b.x * bitmap.width, b.y * bitmap.height, p)
-            }
-        }
-    }
-
-    private fun drawConnections(canvas: Canvas, bitmap: Bitmap, frame: TrackingFrame, color: Int, width: Float) {
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            this.color = color
-            strokeWidth = width.coerceAtLeast(0.5f)
-            style = Paint.Style.STROKE
-        }
-        val edges = when (frame.mode) {
-            TrackingMode.HAND -> HAND_EDGES
-            TrackingMode.BODY -> BODY_EDGES
-            TrackingMode.FACE -> FACE_EDGES
-        }
-        frame.groups.forEach { group ->
-            val points = group.associateBy { it.index }
-            edges.forEach { (aIndex, bIndex) ->
-                val a = points[aIndex]
-                val b = points[bIndex]
-                if (a != null && b != null) {
-                    canvas.drawLine(a.x * bitmap.width, a.y * bitmap.height, b.x * bitmap.width, b.y * bitmap.height, paint)
+                is Call -> {
+                    require(callDepth < MAX_CALL_DEPTH) { "Function call depth exceeded" }
+                    val function = state.program.functions[statement.name]
+                        ?: error("Unknown function: ${statement.name}")
+                    require(statement.arguments.size == function.parameters.size) {
+                        "${function.name} expects ${function.parameters.size} arguments, got ${statement.arguments.size}"
+                    }
+                    val arguments = statement.arguments.map(::number)
+                    val oldValues = function.parameters.associateWith { vars[it] }
+                    function.parameters.forEachIndexed { parameterIndex, parameter ->
+                        vars[parameter] = arguments[parameterIndex].toString()
+                    }
+                    execute(function.body, vars, state, pixelActive, callDepth + 1)
+                    function.parameters.forEach { restore(vars, it, oldValues[it]) }
                 }
             }
         }
     }
 
-    /**
-     * Landmark-centered smooth lens. Unlike the old implementation this does not stretch a square
-     * crop. Pixels are radially warped and smoothly return to their original position at the edge.
-     */
-    private fun magnify(
-        source: Bitmap,
-        output: Bitmap,
-        frame: TrackingFrame,
-        groupIndex: Int,
-        originalPointIndex: Int,
-        scale: Double,
-        radiusFraction: Double
+    private fun executePixels(
+        statement: Pixels,
+        vars: MutableMap<String, String>,
+        state: ExecutionState,
+        callDepth: Int
     ) {
-        val point = frame.groups.getOrNull(groupIndex)?.firstOrNull { it.index == originalPointIndex } ?: return
-        bulge(source, output, point.x.toDouble(), point.y.toDouble(), scale, radiusFraction)
-    }
+        fun number(expression: String): Double = eval(expression, vars, state)
 
-    /** Smooth radial bulge centered at normalized camera coordinates. */
-    private fun bulge(
-        source: Bitmap,
-        output: Bitmap,
-        normalizedX: Double,
-        normalizedY: Double,
-        scale: Double,
-        radiusFraction: Double
-    ) {
-        if (source.width != output.width || source.height != output.height) return
+        val nx = statement.x?.let(::number) ?: 0.0
+        val ny = statement.y?.let(::number) ?: 0.0
+        val nw = statement.width?.let(::number) ?: 1.0
+        val nh = statement.height?.let(::number) ?: 1.0
 
-        val width = source.width
-        val height = source.height
-        val cx = (normalizedX * width).toInt()
-        val cy = (normalizedY * height).toInt()
-        val radius = (min(width, height) * radiusFraction.coerceIn(0.01, 0.5)).toInt().coerceAtLeast(2)
-        if (cx < -radius || cy < -radius || cx >= width + radius || cy >= height + radius) return
+        val x0n = min(nx, nx + nw).coerceIn(0.0, 1.0)
+        val x1n = max(nx, nx + nw).coerceIn(0.0, 1.0)
+        val y0n = min(ny, ny + nh).coerceIn(0.0, 1.0)
+        val y1n = max(ny, ny + nh).coerceIn(0.0, 1.0)
 
-        val left = max(0, cx - radius)
-        val top = max(0, cy - radius)
-        val right = min(width, cx + radius + 1)
-        val bottom = min(height, cy + radius + 1)
-        val patchWidth = right - left
-        val patchHeight = bottom - top
-        if (patchWidth < 2 || patchHeight < 2) return
+        val left = floor(x0n * state.width).toInt().coerceIn(0, state.width)
+        val right = ceil(x1n * state.width).toInt().coerceIn(0, state.width)
+        val top = floor(y0n * state.height).toInt().coerceIn(0, state.height)
+        val bottom = ceil(y1n * state.height).toInt().coerceIn(0, state.height)
 
-        val sourcePixels = IntArray(patchWidth * patchHeight)
-        val outputPixels = IntArray(patchWidth * patchHeight)
-        source.getPixels(sourcePixels, 0, patchWidth, left, top, patchWidth, patchHeight)
-        output.getPixels(outputPixels, 0, patchWidth, left, top, patchWidth, patchHeight)
+        val specialNames = listOf("x", "y", "ix", "iy", "r", "g", "b", "a")
+        val oldValues = specialNames.associateWith { vars[it] }
 
-        val localCx = cx - left
-        val localCy = cy - top
-        val safeScale = scale.coerceIn(0.5, 4.0)
-        val radiusD = radius.toDouble()
+        try {
+            for (iy in top until bottom) {
+                for (ix in left until right) {
+                    state.budget.pixel()
+                    val arrayIndex = iy * state.width + ix
+                    val current = state.outputPixels[arrayIndex]
 
-        for (y in 0 until patchHeight) {
-            val dy = y - localCy
-            for (x in 0 until patchWidth) {
-                val dx = x - localCx
-                val distance = sqrt((dx * dx + dy * dy).toDouble())
-                if (distance >= radiusD) continue
+                    vars["ix"] = ix.toString()
+                    vars["iy"] = iy.toString()
+                    vars["x"] = if (state.width <= 1) "0" else (ix.toDouble() / (state.width - 1)).toString()
+                    vars["y"] = if (state.height <= 1) "0" else (iy.toDouble() / (state.height - 1)).toString()
+                    vars["r"] = (Color.red(current) / 255.0).toString()
+                    vars["g"] = (Color.green(current) / 255.0).toString()
+                    vars["b"] = (Color.blue(current) / 255.0).toString()
+                    vars["a"] = (Color.alpha(current) / 255.0).toString()
 
-                val d = distance / radiusD
-                val falloff = 1.0 - d
-                val localScale = 1.0 + (safeScale - 1.0) * falloff * falloff
-                val sampleX = localCx + dx / localScale
-                val sampleY = localCy + dy / localScale
-                val sampled = bilinear(sourcePixels, patchWidth, patchHeight, sampleX, sampleY)
+                    execute(statement.body, vars, state, pixelActive = true, callDepth = callDepth)
 
-                // Fade the last 12% into the live preview. This hides any tiny timing difference
-                // between the analysis frame and the independently rendered CameraX preview.
-                val feather = ((1.0 - d) / 0.12).coerceIn(0.0, 1.0).toFloat()
-                val index = y * patchWidth + x
-                outputPixels[index] = mixColor(outputPixels[index], sampled, feather)
+                    state.outputPixels[arrayIndex] = color(
+                        vars["r"]?.toDoubleOrNull() ?: 0.0,
+                        vars["g"]?.toDoubleOrNull() ?: 0.0,
+                        vars["b"]?.toDoubleOrNull() ?: 0.0,
+                        vars["a"]?.toDoubleOrNull() ?: 1.0
+                    )
+                }
             }
+        } finally {
+            specialNames.forEach { restore(vars, it, oldValues[it]) }
         }
-
-        output.setPixels(outputPixels, 0, patchWidth, left, top, patchWidth, patchHeight)
     }
 
-    private fun bilinear(pixels: IntArray, width: Int, height: Int, x: Double, y: Double): Int {
-        val sx = x.coerceIn(0.0, (width - 1).toDouble())
-        val sy = y.coerceIn(0.0, (height - 1).toDouble())
-        val x0 = sx.toInt()
-        val y0 = sy.toInt()
-        val x1 = min(x0 + 1, width - 1)
-        val y1 = min(y0 + 1, height - 1)
-        val tx = (sx - x0).toFloat()
-        val ty = (sy - y0).toFloat()
-        val top = mixColor(pixels[y0 * width + x0], pixels[y0 * width + x1], tx)
-        val bottom = mixColor(pixels[y1 * width + x0], pixels[y1 * width + x1], tx)
-        return mixColor(top, bottom, ty)
-    }
-
-    private fun mixColor(a: Int, b: Int, t: Float): Int {
-        val f = t.coerceIn(0f, 1f)
-        fun mix(x: Int, y: Int): Int = (x + (y - x) * f).toInt().coerceIn(0, 255)
-        return Color.argb(
-            mix(Color.alpha(a), Color.alpha(b)),
-            mix(Color.red(a), Color.red(b)),
-            mix(Color.green(a), Color.green(b)),
-            mix(Color.blue(a), Color.blue(b))
-        )
-    }
-
-    private fun pixelate(bitmap: Bitmap, size: Int) {
-        val w = max(1, bitmap.width / size)
-        val h = max(1, bitmap.height / size)
-        val tiny = Bitmap.createScaledBitmap(bitmap, w, h, false)
-        Canvas(bitmap).drawBitmap(
-            tiny,
-            null,
-            Rect(0, 0, bitmap.width, bitmap.height),
-            Paint().apply { isFilterBitmap = false }
-        )
-        tiny.recycle()
-    }
+    private fun eval(
+        expression: String,
+        vars: Map<String, String>,
+        state: ExecutionState
+    ): Double = ExpressionEvaluator(
+        source = expression,
+        vars = vars,
+        tracking = state.frame,
+        frameIndex = state.frameIndex,
+        elapsedSeconds = state.elapsed,
+        samplePixel = state.sampler::sample
+    ).eval()
 
     private fun condition(
-        expr: String,
+        expression: String,
         vars: Map<String, String>,
-        frame: TrackingFrame,
-        frameIndex: Long,
-        elapsed: Double
+        state: ExecutionState
     ): Boolean {
-        val trimmed = expr.trim()
-        if (trimmed == "tracked") return frame.groups.isNotEmpty()
-        val match = Regex("^(.+?)\\s*(==|!=|>=|<=|>|<)\\s*(.+)$").matchEntire(trimmed)
-        if (match != null) {
-            val (left, op, right) = match.destructured
-            val ln = numberOrNull(left, vars, frame, frameIndex, elapsed)
-            val rn = numberOrNull(right, vars, frame, frameIndex, elapsed)
-            if (ln != null && rn != null) return when (op) {
-                "==" -> abs(ln - rn) < 1e-9
-                "!=" -> abs(ln - rn) >= 1e-9
-                ">" -> ln > rn
-                "<" -> ln < rn
-                ">=" -> ln >= rn
-                "<=" -> ln <= rn
+        val trimmed = expression.trim()
+        if (trimmed == "tracked") return state.frame.groups.isNotEmpty()
+        val comparison = Regex("^(.+?)\\s*(==|!=|>=|<=|>|<)\\s*(.+)$").matchEntire(trimmed)
+        if (comparison != null) {
+            val (left, op, right) = comparison.destructured
+            val leftNumber = numberOrNull(left, vars, state)
+            val rightNumber = numberOrNull(right, vars, state)
+            if (leftNumber != null && rightNumber != null) {
+                return when (op) {
+                    "==" -> abs(leftNumber - rightNumber) < 1e-9
+                    "!=" -> abs(leftNumber - rightNumber) >= 1e-9
+                    ">" -> leftNumber > rightNumber
+                    "<" -> leftNumber < rightNumber
+                    ">=" -> leftNumber >= rightNumber
+                    "<=" -> leftNumber <= rightNumber
+                    else -> false
+                }
+            }
+            val leftText = resolveText(left, vars)
+            val rightText = resolveText(right, vars)
+            return when (op) {
+                "==" -> leftText == rightText
+                "!=" -> leftText != rightText
                 else -> false
             }
-            val l = resolveText(left.trim(), vars)
-            val r = resolveText(right.trim(), vars)
-            return if (op == "==") l == r else if (op == "!=") l != r else false
         }
-        return runCatching {
-            ExpressionEvaluator(trimmed, vars, frame, frameIndex, elapsed).eval() != 0.0
-        }.getOrDefault(false)
+        return runCatching { eval(trimmed, vars, state) != 0.0 }.getOrDefault(false)
     }
 
     private fun numberOrNull(
-        expr: String,
+        expression: String,
         vars: Map<String, String>,
-        frame: TrackingFrame,
-        frameIndex: Long,
-        elapsed: Double
+        state: ExecutionState
     ): Double? {
-        val t = expr.trim()
+        val trimmed = expression.trim()
         if (
-            Regex("^[A-Za-z_][A-Za-z0-9_]*$").matches(t) &&
-            vars[t]?.toDoubleOrNull() == null &&
-            t !in setOf("pi", "e", "time", "frame", "tracked", "groups")
+            Regex("^[A-Za-z_][A-Za-z0-9_]*$").matches(trimmed) &&
+            vars[trimmed]?.toDoubleOrNull() == null &&
+            trimmed !in BUILTIN_NUMERIC_NAMES
         ) return null
-        return runCatching { ExpressionEvaluator(t, vars, frame, frameIndex, elapsed).eval() }.getOrNull()
+        return runCatching { eval(trimmed, vars, state) }.getOrNull()
     }
 
     private fun resolveText(token: String, vars: Map<String, String>): String =
         vars[token.trim()] ?: token.trim().removeSurrounding("\"").replace('_', ' ')
 
-    private fun parseColor(text: String): Int = Color.parseColor(if (text.startsWith("#")) text else "#$text")
+    private fun color(r: Double, g: Double, b: Double, a: Double): Int = Color.argb(
+        (a.coerceIn(0.0, 1.0) * 255.0).roundToInt(),
+        (r.coerceIn(0.0, 1.0) * 255.0).roundToInt(),
+        (g.coerceIn(0.0, 1.0) * 255.0).roundToInt(),
+        (b.coerceIn(0.0, 1.0) * 255.0).roundToInt()
+    )
+
+    private fun restore(vars: MutableMap<String, String>, name: String, oldValue: String?) {
+        if (oldValue == null) vars.remove(name) else vars[name] = oldValue
+    }
+
+    private fun identifier(text: String): String {
+        require(Regex("^[A-Za-z_][A-Za-z0-9_]{0,63}$").matches(text)) { "Invalid identifier: $text" }
+        return text
+    }
+
+    private fun containsPixels(statements: List<Statement>): Boolean = statements.any { statement ->
+        when (statement) {
+            is Pixels -> true
+            is Repeat -> containsPixels(statement.body)
+            is If -> containsPixels(statement.yes) || containsPixels(statement.no)
+            else -> false
+        }
+    }
+
+    private fun countStatements(statements: List<Statement>): Int = statements.sumOf { statement ->
+        1 + when (statement) {
+            is Pixels -> countStatements(statement.body)
+            is Repeat -> countStatements(statement.body)
+            is If -> countStatements(statement.yes) + countStatements(statement.no)
+            else -> 0
+        }
+    }
+
+    private data class ExecutionState(
+        val program: Program,
+        val frame: TrackingFrame,
+        val frameIndex: Long,
+        val elapsed: Double,
+        val width: Int,
+        val height: Int,
+        val sourcePixels: IntArray,
+        val outputPixels: IntArray,
+        val sampler: SourceSampler,
+        val budget: ExecutionBudget
+    )
+
+    private class ExecutionBudget {
+        private var operations = 0
+        private var pixelVisits = 0
+
+        fun operation() {
+            operations++
+            require(operations <= MAX_FRAME_OPERATIONS) { "Script exceeded the per-frame operation budget" }
+        }
+
+        fun pixel() {
+            pixelVisits++
+            require(pixelVisits <= MAX_PIXEL_VISITS) { "Script exceeded the per-frame pixel budget" }
+            operation()
+        }
+    }
+
+    /** Immutable camera-frame sampler with bilinear interpolation and a one-sample cache. */
+    private class SourceSampler(
+        private val pixels: IntArray,
+        private val width: Int,
+        private val height: Int
+    ) {
+        private var lastX = Double.NaN
+        private var lastY = Double.NaN
+        private var lastColor = Color.TRANSPARENT
+
+        fun sample(normalizedX: Double, normalizedY: Double): Int {
+            val nx = normalizedX.coerceIn(0.0, 1.0)
+            val ny = normalizedY.coerceIn(0.0, 1.0)
+            if (nx == lastX && ny == lastY) return lastColor
+
+            val px = nx * (width - 1)
+            val py = ny * (height - 1)
+            val x0 = floor(px).toInt().coerceIn(0, width - 1)
+            val y0 = floor(py).toInt().coerceIn(0, height - 1)
+            val x1 = min(x0 + 1, width - 1)
+            val y1 = min(y0 + 1, height - 1)
+            val tx = px - x0
+            val ty = py - y0
+
+            val top = mix(pixels[y0 * width + x0], pixels[y0 * width + x1], tx)
+            val bottom = mix(pixels[y1 * width + x0], pixels[y1 * width + x1], tx)
+            val result = mix(top, bottom, ty)
+            lastX = nx
+            lastY = ny
+            lastColor = result
+            return result
+        }
+
+        private fun mix(a: Int, b: Int, t: Double): Int {
+            fun channel(av: Int, bv: Int): Int = (av + (bv - av) * t).roundToInt().coerceIn(0, 255)
+            return Color.argb(
+                channel(Color.alpha(a), Color.alpha(b)),
+                channel(Color.red(a), Color.red(b)),
+                channel(Color.green(a), Color.green(b)),
+                channel(Color.blue(a), Color.blue(b))
+            )
+        }
+    }
 
     companion object {
-        private val HAND_EDGES = listOf(
-            0 to 1, 1 to 2, 2 to 3, 3 to 4,
-            0 to 5, 5 to 6, 6 to 7, 7 to 8,
-            5 to 9, 9 to 10, 10 to 11, 11 to 12,
-            9 to 13, 13 to 14, 14 to 15, 15 to 16,
-            13 to 17, 17 to 18, 18 to 19, 19 to 20, 0 to 17
+        private val CHANNELS = setOf("r", "g", "b", "a")
+        private val BUILTIN_NUMERIC_NAMES = setOf(
+            "pi", "tau", "e", "time", "frame", "tracked", "groups",
+            "image_width", "image_height", "aspect", "x", "y", "ix", "iy", "r", "g", "b", "a", "loop"
+        )
+        private val REMOVED_EFFECT_COMMANDS = setOf(
+            "skeleton", "connections", "dots", "magnify", "bulge", "pixelate", "tint",
+            "circle", "line", "rect", "text", "invert", "grayscale", "sepia", "blur", "sharpen"
         )
 
-        private val BODY_EDGES = listOf(
-            0 to 1, 1 to 2, 2 to 3, 3 to 7,
-            0 to 4, 4 to 5, 5 to 6, 6 to 8,
-            9 to 10, 11 to 12, 11 to 13, 13 to 15,
-            15 to 17, 15 to 19, 15 to 21, 17 to 19,
-            12 to 14, 14 to 16, 16 to 18, 16 to 20,
-            16 to 22, 18 to 20, 11 to 23, 12 to 24,
-            23 to 24, 23 to 25, 25 to 27, 27 to 29,
-            29 to 31, 27 to 31, 24 to 26, 26 to 28,
-            28 to 30, 30 to 32, 28 to 32
-        )
-
-        private fun loop(points: List<Int>): List<Pair<Int, Int>> =
-            points.zipWithNext() + listOf(points.last() to points.first())
-
-        private val FACE_EDGES = buildList {
-            addAll(loop(listOf(10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109)))
-            addAll(loop(listOf(33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246)))
-            addAll(loop(listOf(263, 249, 390, 373, 374, 380, 381, 382, 362, 398, 384, 385, 386, 387, 388, 466)))
-            addAll(loop(listOf(61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291, 409, 270, 269, 267, 0, 37, 39, 40, 185)))
-            addAll(listOf(70 to 63, 63 to 105, 105 to 66, 66 to 107, 336 to 296, 296 to 334, 334 to 293, 293 to 300))
-        }
+        private const val MAX_SCRIPT_CHARS = 65_536
+        private const val MAX_FUNCTIONS = 64
+        private const val MAX_FUNCTION_PARAMETERS = 16
+        private const val MAX_STATEMENTS = 2_048
+        private const val MAX_REPEAT = 1_000
+        private const val MAX_CALL_DEPTH = 16
+        private const val MAX_FRAME_OPERATIONS = 5_000_000
+        private const val MAX_PIXEL_VISITS = 1_000_000
     }
 }
