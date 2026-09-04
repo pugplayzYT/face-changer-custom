@@ -28,9 +28,8 @@ import java.util.concurrent.atomic.AtomicReference
  * Smooth preview + separately throttled analysis.
  *
  * Preview and analysis are bound in one UseCaseGroup with PreviewView's ViewPort, then the
- * ImageProxy cropRect is applied before MediaPipe sees the frame. That makes normalized landmarks
- * and script pixels refer to the exact same sensor area visible on screen instead of a slightly
- * wider analysis frame.
+ * ImageProxy cropRect is applied before MediaPipe sees the frame. Normal drawing and local lens
+ * effects are rendered as a transparent overlay, so they never replace/zoom the native preview.
  */
 @Composable
 fun FilterCameraView(
@@ -60,8 +59,14 @@ fun FilterCameraView(
     }
     val host = remember {
         FrameLayout(context).apply {
-            addView(previewView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-            addView(effectView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+            addView(
+                previewView,
+                FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            )
+            addView(
+                effectView,
+                FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            )
         }
     }
 
@@ -77,7 +82,9 @@ fun FilterCameraView(
         var analysis: ImageAnalysis? = null
         var displayed: Bitmap? = null
 
-        val needsSourcePixels = scriptNeedsCameraPixels(code)
+        // Pixelate intentionally replaces the whole frame. Everything else, including magnify and
+        // bulge, can be drawn as a transparent overlay on top of the smooth CameraX preview.
+        val needsFullFrame = scriptNeedsFullFrame(code)
         val providerFuture = ProcessCameraProvider.getInstance(context)
 
         providerFuture.addListener({
@@ -119,16 +126,10 @@ fun FilterCameraView(
                         cameraBitmap = proxyToVisibleBitmap(proxy, front)
                         val tracking = tracker.detect(cameraBitmap, mode)
 
-                        output = if (needsSourcePixels) {
+                        output = if (needsFullFrame) {
                             engine.render(cameraBitmap, tracking, program, latestValues.get())
                         } else {
-                            val transparent = Bitmap.createBitmap(cameraBitmap.width, cameraBitmap.height, Bitmap.Config.ARGB_8888)
-                            transparent.eraseColor(android.graphics.Color.TRANSPARENT)
-                            try {
-                                engine.render(transparent, tracking, program, latestValues.get())
-                            } finally {
-                                if (!transparent.isRecycled) transparent.recycle()
-                            }
+                            engine.renderOverlay(cameraBitmap, tracking, program, latestValues.get())
                         }
 
                         val frameToPost = output
@@ -192,8 +193,8 @@ fun FilterCameraView(
     }
 }
 
-private fun scriptNeedsCameraPixels(code: String): Boolean =
-    Regex("(?im)^\\s*(magnify|pixelate)\\b").containsMatchIn(code)
+private fun scriptNeedsFullFrame(code: String): Boolean =
+    Regex("(?im)^\\s*pixelate\\b").containsMatchIn(code)
 
 /** Apply CameraX's shared ViewPort crop before rotation/mirroring. */
 private fun proxyToVisibleBitmap(proxy: androidx.camera.core.ImageProxy, mirror: Boolean): Bitmap {
