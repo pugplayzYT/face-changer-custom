@@ -6,9 +6,10 @@ An open-source Android MediaPipe camera-effect studio. It tracks **face, hands, 
 
 - Front/back camera switching.
 - MediaPipe Face Landmarker, Hand Landmarker and Pose Landmarker.
+- A native CameraX preview that stays smooth while MediaPipe analysis runs separately.
 - Low / Medium / High detail for every tracking mode, with stable original MediaPipe landmark indices across LOD sampling.
 - Three built-in skeleton/mesh apps written in the same scripting language as custom filters. Their source is viewable in-app and can be saved as an editable copy.
-- Home screen with saved custom apps, code editor, mode/detail controls and live app inputs.
+- Home screen with saved custom apps, delete controls, code editor, mode/detail controls and live app inputs.
 - Sandboxed pixel/drawing operations: magnify, pixelate, tint, dots, proper landmark connections, circles, lines, rectangles and text.
 - `let` variables, `if` / `else`, bounded `repeat` loops, numeric/text inputs and comparisons.
 - Scientific expressions and animation values/functions including `time`, `frame`, trig, powers, roots, logs, interpolation and direct landmark coordinate functions.
@@ -23,12 +24,14 @@ Run `gradle assembleDebug` or open the project in Android Studio.
 
 ## Automatic releases
 
-Every push to `main` runs `.github/workflows/release.yml`. It builds `assembleRelease`, uploads the APK as a workflow artifact, and creates a GitHub Release tagged `build-<run number>` containing `face-changer-custom-release.apk`. CI also uses the run number as Android `versionCode`, so newer release APKs install as upgrades instead of all pretending to be version code 1.
+Every push to `main` runs `.github/workflows/release.yml`. It builds an installable debug-signed APK, uploads it as a workflow artifact, and creates a GitHub Release tagged `build-<run number>` containing `face-changer-custom-release.apk`. The project does not store a custom keystore, signing password, or signing secret. Android still requires APKs to carry a signature, so CI relies only on the build environment's automatic debug signing.
+
+Because there is no persistent signing identity, Android may require uninstalling an older CI build before installing a newer one.
 
 ## Scripting
 
 See [`app/src/main/assets/SCRIPTING.md`](app/src/main/assets/SCRIPTING.md). The same file is rendered by the app's Docs screen and copied by its Copy Docs button, preventing the repository documentation and in-app reference from drifting apart.
 
-## Architecture note
+## Camera and memory architecture
 
-The current renderer processes a 1280×720 analysis stream rather than pretending a phone can run full MediaPipe + arbitrary CPU pixel effects at 1080p60. CameraX uses `KEEP_ONLY_LATEST`, so expensive scripts drop frames rather than accumulating latency. This is a solid base for a future GPU shader backend while keeping custom scripts host-controlled and sandboxed.
+The visible camera uses CameraX `PreviewView`, independent from MediaPipe inference. LOW/MEDIUM/HIGH use progressively larger analysis frames while `KEEP_ONLY_LATEST` drops stale analysis frames. Every temporary MediaPipe `MPImage` is explicitly closed after inference and bitmap ownership is bounded so camera processing cannot accumulate an unbounded frame queue.

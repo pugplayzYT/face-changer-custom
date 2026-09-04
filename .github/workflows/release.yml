@@ -20,10 +20,10 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-      - name: Build release APK
-        run: gradle --no-daemon clean assembleRelease -PciVersionCode=${{ github.run_number }}
+      - name: Build installable APK
+        run: gradle --no-daemon clean assembleDebug -PciVersionCode=${{ github.run_number }}
       - name: Rename APK
-        run: cp app/build/outputs/apk/release/app-release.apk face-changer-custom-release.apk
+        run: cp app/build/outputs/apk/debug/app-debug.apk face-changer-custom-release.apk
       - uses: actions/upload-artifact@v4
         with:
           name: face-changer-custom-release
@@ -33,7 +33,7 @@ jobs:
         with:
           tag_name: build-${{ github.run_number }}
           name: Build ${{ github.run_number }}
-          body: Automated Android release for `${{ github.sha }}`. APK version code is `${{ github.run_number }}`.
+          body: Automated Android build for `${{ github.sha }}`. No custom signing key or signing secret is stored by this project.
           prerelease: false
           make_latest: true
           files: face-changer-custom-release.apk

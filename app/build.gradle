@@ -23,8 +23,6 @@ android {
     buildTypes {
         release {
             minifyEnabled false
-            // Open-source demo: signs release builds with the standard debug key so CI APKs are installable.
-            signingConfig signingConfigs.debug
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }
