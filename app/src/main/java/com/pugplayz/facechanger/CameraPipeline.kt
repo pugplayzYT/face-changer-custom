@@ -11,6 +11,7 @@ import androidx.camera.core.Preview
 import androidx.camera.core.UseCaseGroup
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.SideEffect
@@ -64,7 +65,7 @@ fun FilterCameraView(
         }
     }
 
-    AndroidView(factory = { host }, modifier = Modifier)
+    AndroidView(factory = { host }, modifier = Modifier.fillMaxSize())
 
     DisposableEffect(front, mode, code, lifecycle) {
         val worker = Executors.newSingleThreadExecutor()
