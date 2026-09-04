@@ -452,25 +452,49 @@ if tracked
   write_pixel px py+1/image_height 0.29 0.84 0.67 1
 end"""
 
+/**
+ * Fast script-only line primitive.
+ *
+ * The old premades visited essentially every pixel along every segment and wrote three pixels per
+ * sample. A face frame could therefore execute tens of thousands of interpreted write_pixel calls
+ * before the next MediaPipe result was allowed through. Sampling at ~2px spacing is visually
+ * continuous at the 640x480 analysis resolution while cutting the work by an order of magnitude.
+ */
 private fun segmentPrimitive() = """fn segment grp a b rr gg bb
   if and(point_exists(grp,a),point_exists(grp,b))
     let x1 = landmark_x(grp,a)
     let y1 = landmark_y(grp,a)
     let x2 = landmark_x(grp,b)
     let y2 = landmark_y(grp,b)
-    let steps = min(120,max(2,ceil(distance(x1,y1,x2,y2)*image_width)))
+    let steps = min(28,max(2,ceil(distance(x1,y1,x2,y2)*image_width/2)))
     repeat steps
       let t = loop/max(1,steps-1)
       let px = lerp(x1,x2,t)
       let py = lerp(y1,y2,t)
       write_pixel px py rr gg bb 1
-      write_pixel px+1/image_width py rr gg bb 1
-      write_pixel px py+1/image_height rr gg bb 1
     end
   end
 end"""
 
-private fun scriptForEdges(edges: List<Pair<Int, Int>>, color: Triple<Double, Double, Double>): String = buildString {
+/** Draw every landmark, restoring the dense dot cloud the original premades displayed. */
+private fun allLandmarkDots(rr: Double, gg: Double, bb: Double): String = """repeat groups
+  let dot_grp = loop
+  let dot_count = landmark_count(dot_grp)
+  repeat dot_count
+    let dot_index = loop
+    let dot_x = landmark_x(dot_grp,dot_index)
+    let dot_y = landmark_y(dot_grp,dot_index)
+    write_pixel dot_x dot_y $rr $gg $bb 1
+    write_pixel dot_x+1/image_width dot_y $rr $gg $bb 1
+    write_pixel dot_x dot_y+1/image_height $rr $gg $bb 1
+  end
+end"""
+
+private fun scriptForEdges(
+    edges: List<Pair<Int, Int>>,
+    color: Triple<Double, Double, Double>,
+    dotColor: Triple<Double, Double, Double>? = null
+): String = buildString {
     appendLine(segmentPrimitive())
     appendLine("repeat groups")
     appendLine("  let grp = loop")
@@ -478,17 +502,32 @@ private fun scriptForEdges(edges: List<Pair<Int, Int>>, color: Triple<Double, Do
         appendLine("  call segment grp $a $b ${color.first} ${color.second} ${color.third}")
     }
     appendLine("end")
+    dotColor?.let { dots ->
+        appendLine(allLandmarkDots(dots.first, dots.second, dots.third))
+    }
 }.trim()
 
 private fun loopEdges(points: List<Int>): List<Pair<Int, Int>> =
     if (points.size < 2) emptyList() else points.zipWithNext() + (points.last() to points.first())
 
 private val FACE_SAMPLE_EDGES: List<Pair<Int, Int>> = buildList {
+    // Face oval.
     addAll(loopEdges(listOf(10,338,297,332,284,251,389,356,454,323,361,288,397,365,379,378,400,377,152,148,176,149,150,136,172,58,132,93,234,127,162,21,54,103,67,109)))
+    // Eyes.
     addAll(loopEdges(listOf(33,7,163,144,145,153,154,155,133,173,157,158,159,160,161,246)))
     addAll(loopEdges(listOf(263,249,390,373,374,380,381,382,362,398,384,385,386,387,388,466)))
+    // Outer and inner lips.
     addAll(loopEdges(listOf(61,146,91,181,84,17,314,405,321,375,291,409,270,269,267,0,37,39,40,185)))
-    addAll(listOf(70 to 63,63 to 105,105 to 66,66 to 107,336 to 296,296 to 334,334 to 293,293 to 300))
+    addAll(loopEdges(listOf(78,95,88,178,87,14,317,402,318,324,308,415,310,311,312,13,82,81,80,191)))
+    // Eyebrows.
+    addAll(listOf(70 to 63,63 to 105,105 to 66,66 to 107,46 to 53,53 to 52,52 to 65,65 to 55))
+    addAll(listOf(336 to 296,296 to 334,334 to 293,293 to 300,276 to 283,283 to 282,282 to 295,295 to 285))
+    // Nose bridge and nostril outline.
+    addAll(listOf(168 to 6,6 to 197,197 to 195,195 to 5,5 to 4,4 to 1,1 to 19,19 to 94,94 to 2))
+    addAll(listOf(98 to 97,97 to 2,2 to 326,326 to 327,327 to 294,294 to 278,278 to 344,344 to 440,440 to 275,275 to 4,4 to 45,45 to 220,220 to 115,115 to 48,48 to 64,64 to 98))
+    // Irises are present when the model exposes the refined 478-point face set.
+    addAll(loopEdges(listOf(469,470,471,472)))
+    addAll(loopEdges(listOf(474,475,476,477)))
 }
 
 private val HAND_SAMPLE_EDGES = listOf(
@@ -507,28 +546,40 @@ private fun premadeFilters() = listOf(
     FilterApp(
         "premade-face",
         "Face Mesh",
-        "Face contour, eyes and lips. The entire effect is ordinary sandbox source you can inspect and fork.",
+        "Dense full-landmark dots plus face, eye, lip, brow, nose and iris contours. Ordinary sandbox source you can inspect and fork.",
         TrackingMode.FACE,
         DetailLevel.HIGH,
-        scriptForEdges(FACE_SAMPLE_EDGES, Triple(0.34, 0.66, 1.0)),
+        scriptForEdges(
+            FACE_SAMPLE_EDGES,
+            Triple(0.34, 0.66, 1.0),
+            dotColor = Triple(0.29, 0.84, 0.67)
+        ),
         true
     ),
     FilterApp(
         "premade-hand",
         "Hand Skeleton",
-        "Hand bone connections implemented only with functions, math, landmarks, repeat and write_pixel.",
+        "Hand bone connections plus every tracked hand landmark, implemented with ordinary sandbox primitives.",
         TrackingMode.HAND,
         DetailLevel.HIGH,
-        scriptForEdges(HAND_SAMPLE_EDGES, Triple(0.29, 0.84, 0.67)),
+        scriptForEdges(
+            HAND_SAMPLE_EDGES,
+            Triple(0.29, 0.84, 0.67),
+            dotColor = Triple(0.34, 0.66, 1.0)
+        ),
         true
     ),
     FilterApp(
         "premade-body",
         "Body Skeleton",
-        "Pose connections implemented in the same language available to every custom filter.",
+        "Pose connections plus every tracked body landmark using the same language available to custom filters.",
         TrackingMode.BODY,
         DetailLevel.HIGH,
-        scriptForEdges(BODY_SAMPLE_EDGES, Triple(0.34, 0.66, 1.0)),
+        scriptForEdges(
+            BODY_SAMPLE_EDGES,
+            Triple(0.34, 0.66, 1.0),
+            dotColor = Triple(0.29, 0.84, 0.67)
+        ),
         true
     )
 )
