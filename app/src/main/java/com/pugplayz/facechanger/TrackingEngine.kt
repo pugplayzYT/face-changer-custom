@@ -11,19 +11,18 @@ import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarker
 /**
  * MediaPipe wrapper kept on the camera worker thread.
  *
- * Every MPImage created for a camera frame is closed in finally. Leaving those wrappers alive can
- * retain native image resources across frames and eventually exhaust memory. detect() and close()
- * are synchronized so camera teardown can never close a landmarker while inference is running.
+ * Tracking now always returns the complete landmark set. The old low/medium point sampling was
+ * fundamentally wrong for programmable filters because valid MediaPipe indexes simply vanished.
+ * Every MPImage is still closed in finally and detect/close remain synchronized for safe teardown.
  */
 class TrackingEngine(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
     private var face: FaceLandmarker? = null
     private var hand: HandLandmarker? = null
-    private var poseLite: PoseLandmarker? = null
-    private var poseFull: PoseLandmarker? = null
+    private var pose: PoseLandmarker? = null
 
     @Synchronized
-    fun detect(bitmap: Bitmap, mode: TrackingMode, detail: DetailLevel): TrackingFrame {
+    fun detect(bitmap: Bitmap, mode: TrackingMode): TrackingFrame {
         val image = BitmapImageBuilder(bitmap).build()
         try {
             val groups = when (mode) {
@@ -36,7 +35,7 @@ class TrackingEngine(context: Context) : AutoCloseable {
                             .build()
                     ).also { face = it }
                     detector.detect(image).faceLandmarks().map { list ->
-                        list.mapIndexed { index, p -> Point3(p.x(), p.y(), p.z(), index) }
+                        list.mapIndexed { index, point -> Point3(point.x(), point.y(), point.z(), index) }
                     }
                 }
 
@@ -49,67 +48,40 @@ class TrackingEngine(context: Context) : AutoCloseable {
                             .build()
                     ).also { hand = it }
                     detector.detect(image).landmarks().map { list ->
-                        list.mapIndexed { index, p -> Point3(p.x(), p.y(), p.z(), index) }
+                        list.mapIndexed { index, point -> Point3(point.x(), point.y(), point.z(), index) }
                     }
                 }
 
                 TrackingMode.BODY -> {
-                    val useLite = detail != DetailLevel.HIGH
-                    val detector = if (useLite) {
-                        poseLite ?: newPose("pose_landmarker_lite.task").also { poseLite = it }
-                    } else {
-                        poseFull ?: newPose("pose_landmarker_full.task").also { poseFull = it }
-                    }
+                    val detector = pose ?: PoseLandmarker.createFromOptions(
+                        appContext,
+                        PoseLandmarker.PoseLandmarkerOptions.builder()
+                            .setBaseOptions(BaseOptions.builder().setModelAssetPath("pose_landmarker_full.task").build())
+                            .setNumPoses(1)
+                            .build()
+                    ).also { pose = it }
                     detector.detect(image).landmarks().map { list ->
-                        list.mapIndexed { index, p -> Point3(p.x(), p.y(), p.z(), index) }
+                        list.mapIndexed { index, point -> Point3(point.x(), point.y(), point.z(), index) }
                     }
                 }
             }
-            return TrackingFrame(mode, groups.map { reduceDetail(it, detail) }, System.currentTimeMillis())
+            return TrackingFrame(mode, groups, System.currentTimeMillis())
         } finally {
             runCatching { image.close() }
         }
     }
 
-    private fun newPose(asset: String): PoseLandmarker = PoseLandmarker.createFromOptions(
-        appContext,
-        PoseLandmarker.PoseLandmarkerOptions.builder()
-            .setBaseOptions(BaseOptions.builder().setModelAssetPath(asset).build())
-            .setNumPoses(1)
-            .build()
-    )
-
-    private fun reduceDetail(points: List<Point3>, detail: DetailLevel): List<Point3> {
-        if (detail == DetailLevel.HIGH || points.isEmpty()) return points
-        val target = when (detail) {
-            DetailLevel.LOW -> when {
-                points.size > 100 -> 36
-                points.size > 30 -> 16
-                else -> 11
-            }
-
-            DetailLevel.MEDIUM -> when {
-                points.size > 100 -> 120
-                points.size > 30 -> 28
-                else -> 17
-            }
-
-            DetailLevel.HIGH -> points.size
-        }
-        if (target >= points.size) return points
-        val step = points.size.toDouble() / target
-        return (0 until target).map { points[(it * step).toInt().coerceAtMost(points.lastIndex)] }
-    }
+    /** Compatibility for the retired quality UI: detail is intentionally ignored. */
+    fun detect(bitmap: Bitmap, mode: TrackingMode, @Suppress("UNUSED_PARAMETER") detail: DetailLevel): TrackingFrame =
+        detect(bitmap, mode)
 
     @Synchronized
     override fun close() {
         runCatching { face?.close() }
         runCatching { hand?.close() }
-        runCatching { poseLite?.close() }
-        runCatching { poseFull?.close() }
+        runCatching { pose?.close() }
         face = null
         hand = null
-        poseLite = null
-        poseFull = null
+        pose = null
     }
 }
