@@ -4,6 +4,8 @@ plugins {
     id 'org.jetbrains.kotlin.plugin.compose'
 }
 
+def ciVersionCode = providers.gradleProperty('ciVersionCode').getOrElse('1').toInteger()
+
 android {
     namespace 'com.pugplayz.facechanger'
     compileSdk 35
@@ -12,8 +14,8 @@ android {
         applicationId 'com.pugplayz.facechanger'
         minSdk 26
         targetSdk 35
-        versionCode 1
-        versionName '1.0.0'
+        versionCode ciVersionCode
+        versionName "1.0.${ciVersionCode}"
     }
 
     buildFeatures { compose true }

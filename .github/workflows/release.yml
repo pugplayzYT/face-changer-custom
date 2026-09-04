@@ -21,7 +21,7 @@ jobs:
         with:
           gradle-version: '8.9'
       - name: Build release APK
-        run: gradle --no-daemon clean assembleRelease
+        run: gradle --no-daemon clean assembleRelease -PciVersionCode=${{ github.run_number }}
       - name: Rename APK
         run: cp app/build/outputs/apk/release/app-release.apk face-changer-custom-release.apk
       - uses: actions/upload-artifact@v4
@@ -33,7 +33,7 @@ jobs:
         with:
           tag_name: build-${{ github.run_number }}
           name: Build ${{ github.run_number }}
-          body: Automated Android release for `${{ github.sha }}`.
+          body: Automated Android release for `${{ github.sha }}`. APK version code is `${{ github.run_number }}`.
           prerelease: false
           make_latest: true
           files: face-changer-custom-release.apk
