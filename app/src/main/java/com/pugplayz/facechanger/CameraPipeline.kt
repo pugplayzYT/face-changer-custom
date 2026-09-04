@@ -27,9 +27,8 @@ import java.util.concurrent.atomic.AtomicReference
 /**
  * Smooth native CameraX preview plus separately throttled MediaPipe/script analysis.
  *
- * Programs containing a `pixels` block intentionally replace the analyzed frame because they can
- * rewrite every pixel. Programs that only use sparse primitives such as `write_pixel` render as a
- * transparent overlay, so the native preview remains smooth.
+ * Programs containing a `pixels` block are full-frame programs: their result is rendered as the
+ * camera image itself. Sparse programs such as `write_pixel` remain transparent overlays.
  */
 @Composable
 fun FilterCameraView(
@@ -83,6 +82,7 @@ fun FilterCameraView(
         var displayed: Bitmap? = null
 
         val needsFullFrame = program.usesPixels
+        val needsTracking = scriptNeedsTracking(code)
         val providerFuture = ProcessCameraProvider.getInstance(context)
 
         providerFuture.addListener({
@@ -104,9 +104,18 @@ fun FilterCameraView(
                     .build()
                     .also { it.setSurfaceProvider(previewView.surfaceProvider) }
 
+                // The interpreter is intentionally general, not a hard-coded shader list. A lower
+                // analysis size for full-frame pixel programs keeps arbitrary user pixel code
+                // responsive while the native preview stays full resolution for overlay scripts.
+                val analysisSize = if (needsFullFrame) {
+                    android.util.Size(320, 240)
+                } else {
+                    android.util.Size(640, 480)
+                }
+
                 val localAnalysis = ImageAnalysis.Builder()
                     .setTargetRotation(rotation)
-                    .setTargetResolution(android.util.Size(640, 480))
+                    .setTargetResolution(analysisSize)
                     .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
@@ -122,10 +131,21 @@ fun FilterCameraView(
                     var output: Bitmap? = null
                     try {
                         cameraBitmap = proxyToVisibleBitmap(proxy, front)
-                        val tracking = tracker.detect(cameraBitmap, mode)
+                        val tracking = if (needsTracking) {
+                            tracker.detect(cameraBitmap, mode)
+                        } else {
+                            // Color-only filters such as a user-written invert do not need to pay
+                            // the MediaPipe cost every frame.
+                            TrackingFrame(mode, emptyList(), System.currentTimeMillis())
+                        }
 
                         output = if (needsFullFrame) {
-                            engine.render(cameraBitmap, tracking, program, latestValues.get())
+                            engine.render(cameraBitmap, tracking, program, latestValues.get()).also {
+                                // Camera RGBA buffers are visually opaque. Force that contract at
+                                // display time so an odd producer alpha channel can never make a
+                                // correct full-frame pixel filter appear to do nothing.
+                                it.setHasAlpha(false)
+                            }
                         } else {
                             engine.renderOverlay(cameraBitmap, tracking, program, latestValues.get())
                         }
@@ -190,6 +210,10 @@ fun FilterCameraView(
         }
     }
 }
+
+private fun scriptNeedsTracking(code: String): Boolean = Regex(
+    "(?i)\\b(tracked|groups|landmark_[A-Za-z0-9_]*|point_exists|group_[A-Za-z0-9_]*)\\b"
+).containsMatchIn(code)
 
 /** Apply CameraX's shared ViewPort crop before rotation/mirroring. */
 private fun proxyToVisibleBitmap(proxy: androidx.camera.core.ImageProxy, mirror: Boolean): Bitmap {
