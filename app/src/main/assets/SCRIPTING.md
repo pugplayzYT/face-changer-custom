@@ -85,9 +85,13 @@ Draws a simple consecutive-point chain. `connections` usually looks better for r
 
 ## Pixel effects
 
+`bulge X Y SCALE RADIUS`
+
+Creates a smooth radial lens at normalized camera coordinates. Pixels are warped outward near the center and smoothly return to their original position at the edge, so it enlarges a feature instead of stretching a rectangular crop. `X`, `Y`, `SCALE`, and `RADIUS` are numeric expressions.
+
 `magnify GROUP POINT SCALE RADIUS`
 
-Copies pixels around a tracked point and enlarges/shrinks them. GROUP, POINT, SCALE and RADIUS are numeric expressions. Example:
+Creates the same smooth radial lens centered on a tracked landmark. `GROUP`, `POINT`, `SCALE`, and `RADIUS` are numeric expressions. Example:
 
 `magnify 0 33 strength 0.10`
 
@@ -98,6 +102,8 @@ Downsamples then nearest-neighbour upscales the whole visible camera frame.
 `tint #RRGGBB AMOUNT`
 
 Blends a color over the frame. AMOUNT is clamped from 0.0 to 1.0.
+
+Local effects such as `bulge` and `magnify` are rendered as a transparent overlay on the native CameraX preview. They do not replace or globally zoom the preview.
 
 ## Drawing primitives
 
@@ -139,19 +145,27 @@ Comparisons: `==`, `!=`, `>`, `<`, `>=`, `<=`. Numeric sides can be full express
 
 Repeat counts are hard-capped at 1000 per execution so a script cannot create an unbounded loop.
 
-## Example: animated giant eye
+## Example: actually make both eyes bigger
 
-`input number strength Eye_Size 1.8 0.7 3.0`
+`input number size Eye_Size 1.9 1.0 3.0`
 
-`let pulse = strength + sin(time*5)*0.12`
+`if tracked`
 
-`if point_exists(0,33) > 0`
+`  let leftX = (landmark_x(0,33)+landmark_x(0,133))/2`
 
-`  magnify 0 33 pulse 0.11`
+`  let leftY = (landmark_y(0,159)+landmark_y(0,145))/2`
 
-`  circle landmark_x(0,33) landmark_y(0,33) 0.025 #47D7AC stroke`
+`  let rightX = (landmark_x(0,362)+landmark_x(0,263))/2`
+
+`  let rightY = (landmark_y(0,386)+landmark_y(0,374))/2`
+
+`  bulge leftX leftY size 0.075`
+
+`  bulge rightX rightY size 0.075`
 
 `end`
+
+This uses the eye corners and eyelids to calculate the center of each eye, so the effect follows the whole eye rather than zooming a random landmark.
 
 ## Example: cyber hand
 
@@ -181,7 +195,7 @@ Repeat counts are hard-capped at 1000 per execution so a script cannot create an
 
 ## Sandbox / performance rules
 
-Unknown commands are rejected while saving. There is no arbitrary function dispatch. `repeat` is bounded, magnification radius/scale are clamped, and divide-by-zero math resolves safely. CameraX runs `KEEP_ONLY_LATEST`, so an expensive filter drops intermediate analysis frames instead of building an ever-growing latency queue. The visible preview remains independent and smooth for overlay-only effects.
+Unknown commands are rejected while saving. There is no arbitrary function dispatch. `repeat` is bounded, bulge/magnification radius and scale are clamped, and divide-by-zero math resolves safely. CameraX runs `KEEP_ONLY_LATEST`, so an expensive filter drops intermediate analysis frames instead of building an ever-growing latency queue. The visible preview remains independent and smooth for overlay-only effects.
 
 ## Keeping docs current
 
