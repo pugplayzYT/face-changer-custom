@@ -138,7 +138,12 @@ class ScriptEngine {
                 "let" -> {
                     require(parts.size >= 3) { "let syntax: let NAME = EXPRESSION" }
                     val name = identifier(parts[1])
-                    val expression = line.substringAfter(parts[1]).trim().removePrefix("=").trim()
+                    // Parse relative to the `let` payload, not substringAfter(name): a short name
+                    // such as `t` also occurs in the word `let` and used to produce `t = ...` as
+                    // the expression, which then failed only at runtime.
+                    val declaration = line.removePrefix("let").trimStart()
+                    require(declaration.startsWith(name)) { "let syntax: let NAME = EXPRESSION" }
+                    val expression = declaration.drop(name.length).trimStart().removePrefix("=").trimStart()
                     require(expression.isNotEmpty()) { "let requires an expression" }
                     out += Let(name, expression)
                 }
