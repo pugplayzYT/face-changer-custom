@@ -32,9 +32,7 @@ import java.util.concurrent.atomic.AtomicReference
  * Native CameraX preview plus a separately analyzed effect layer.
  *
  * Preview and analysis deliberately use the same 4:3 camera aspect ratio and both are FIT_CENTER.
- * The old full-screen FILL_CENTER/ViewPort path cropped a tall phone screen out of a 4:3 camera
- * feed, which looked like a permanent digital zoom and made tiny transform differences obvious.
- * Keeping the whole sensor frame also means MediaPipe landmarks and script pixels share one simple
+ * Keeping the whole sensor frame means MediaPipe landmarks and script pixels share one simple
  * coordinate system: the upright, optionally mirrored analysis bitmap.
  */
 @Composable
@@ -59,8 +57,6 @@ fun FilterCameraView(
     }
     val effectView = remember {
         ImageView(context).apply {
-            // The processed bitmap has the same 4:3 source geometry as PreviewView. Never stretch
-            // or crop it independently or landmark overlays stop lining up with the live preview.
             scaleType = ImageView.ScaleType.FIT_CENTER
             setBackgroundColor(android.graphics.Color.TRANSPARENT)
         }
@@ -157,8 +153,6 @@ fun FilterCameraView(
                 .build()
                 .also { it.setSurfaceProvider(previewView.surfaceProvider) }
 
-            // Sparse and local effects get 640x480. Truly global interpreted pixel filters use a
-            // smaller frame because they necessarily execute user code for every camera pixel.
             val analysisSize = if (hasGlobalPixels) {
                 android.util.Size(480, 360)
             } else {
@@ -196,10 +190,22 @@ fun FilterCameraView(
                         TrackingFrame(mode, emptyList(), System.currentTimeMillis())
                     }
 
-                    output = if (program.usesPixels) {
+                    // The bundled Face/Hand/Body examples used to spend most of their frame time
+                    // emulating vector lines with thousands of interpreted write_pixel calls. Their
+                    // exact unmodified generated signatures get a native Canvas fast-path instead.
+                    // Edited/forked scripts immediately fall back to the normal sandbox renderer.
+                    val bundledOverlay = if (!program.usesPixels && needsTracking) {
+                        renderBundledTrackingOverlay(
+                            code = code,
+                            mode = mode,
+                            frame = tracking,
+                            width = cameraBitmap.width,
+                            height = cameraBitmap.height
+                        )
+                    } else null
+
+                    output = bundledOverlay ?: if (program.usesPixels) {
                         engine.render(cameraBitmap, tracking, program, latestValues.get()).also {
-                            // Keep the full-resolution native preview wherever a pixel program made
-                            // no change. Local eye/face warps therefore cover only their actual mask.
                             makeDifferenceOverlay(cameraBitmap, it)
                         }
                     } else {
@@ -345,8 +351,6 @@ private fun proxyToDisplayBitmap(proxy: androidx.camera.core.ImageProxy, mirror:
 
     if (!mirror) return rotated
 
-    // Mirror only after rotation. Doing both transforms in one matrix made the operation order easy
-    // to get wrong on portrait front-camera buffers and produced rotated/misaligned landmarks.
     return Bitmap.createBitmap(
         rotated,
         0,
