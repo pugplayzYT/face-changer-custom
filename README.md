@@ -14,15 +14,12 @@ An open-source Android MediaPipe camera-effect studio. It tracks **face, hands, 
 - Scientific expressions and animation values/functions including `time`, `frame`, trig, powers, roots, logs, interpolation and direct landmark coordinate functions.
 - Formatted in-app scripting reference with **Copy Docs**. `app/src/main/assets/SCRIPTING.md` is the canonical source bundled into the app.
 - Dark graphite + mint/blue UI instead of the default purple Material look.
-- Open-source demo sign-in key hardcoded as `I am super cool 27` (intentionally **not** a secret).
 
 ## Build
 
 Requirements: JDK 17, Android SDK 35 and Gradle 8.9. The build automatically downloads the official MediaPipe `.task` model files into `app/src/main/assets` if they are missing. Those downloaded model files are ignored by Git.
 
 Run `gradle assembleDebug` or open the project in Android Studio.
-
-Release builds deliberately use Android's standard debug signing config because this is an open-source demo and the GitHub release APK needs to be directly installable. Do not treat that signing identity as production security.
 
 ## Automatic releases
 
