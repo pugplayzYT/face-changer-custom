@@ -12,16 +12,15 @@ Inputs become controls on the live filter screen and are variables inside the sc
 
 Syntax: `input number|text NAME LABEL DEFAULT [MIN MAX]`. Use underscores for spaces in labels/default text.
 
-## Tracking mode and detail
+## Tracking mode
 
-Each app chooses **Face**, **Hand**, or **Body**, plus **Low**, **Medium**, or **High** detail in the editor.
+Each app chooses **Face**, **Hand**, or **Body** in the editor.
 
-- High exposes all MediaPipe landmarks.
-- Medium samples a useful subset.
-- Low exposes a smaller subset for lighter filters.
-- Every point keeps its original MediaPipe landmark index even at lower LOD. If a requested point was not included at that LOD, the operation simply has no point to act on.
+There is no quality or landmark-detail switch. Every tracking mode always exposes the complete landmark set returned by its MediaPipe landmarker. A valid MediaPipe landmark index therefore does not disappear because of a lower-detail mode.
 
 Coordinates are normalized: x=0 is left, x=1 is right, y=0 is top, y=1 is bottom. `group 0` is the first detected face/hand/body; a second hand is usually `group 1`.
+
+The camera preview and analysis use the same CameraX viewport/crop, so landmark coordinates and scripted pixels refer to the same visible camera area.
 
 ## Variables and animation
 
@@ -74,15 +73,15 @@ Examples:
 
 `dots #47D7AC 4`
 
-Draws every exposed landmark as a dot.
+Draws every tracked landmark as a dot.
 
 `connections #56A8FF 3`
 
-Draws standard face-contour/eye/lip, hand-bone, or body-pose connections using original landmark indices. At lower LOD, an edge is drawn only when both endpoints are exposed.
+Draws standard face-contour/eye/lip, hand-bone, or body-pose connections using original MediaPipe landmark indexes.
 
 `skeleton #56A8FF 2`
 
-Draws a simple consecutive-point chain. This is useful for debugging custom sampled point sets; `connections` usually looks better for real skeletons.
+Draws a simple consecutive-point chain. `connections` usually looks better for real skeletons.
 
 ## Pixel effects
 
@@ -94,7 +93,7 @@ Copies pixels around a tracked point and enlarges/shrinks them. GROUP, POINT, SC
 
 `pixelate BLOCK_SIZE`
 
-Downsamples then nearest-neighbour upscales the whole frame.
+Downsamples then nearest-neighbour upscales the whole visible camera frame.
 
 `tint #RRGGBB AMOUNT`
 
@@ -102,7 +101,7 @@ Blends a color over the frame. AMOUNT is clamped from 0.0 to 1.0.
 
 ## Drawing primitives
 
-All x/y/w/h/radius coordinates are normalized to the camera frame.
+All x/y/w/h/radius coordinates are normalized to the visible camera frame.
 
 `circle X Y RADIUS #RRGGBB [stroke]`
 
@@ -182,7 +181,7 @@ Repeat counts are hard-capped at 1000 per execution so a script cannot create an
 
 ## Sandbox / performance rules
 
-Unknown commands are rejected while saving. There is no arbitrary function dispatch. `repeat` is bounded, magnification radius/scale are clamped, and divide-by-zero math resolves safely. CameraX runs `KEEP_ONLY_LATEST`, so an expensive filter drops intermediate frames instead of building an ever-growing latency queue.
+Unknown commands are rejected while saving. There is no arbitrary function dispatch. `repeat` is bounded, magnification radius/scale are clamped, and divide-by-zero math resolves safely. CameraX runs `KEEP_ONLY_LATEST`, so an expensive filter drops intermediate analysis frames instead of building an ever-growing latency queue. The visible preview remains independent and smooth for overlay-only effects.
 
 ## Keeping docs current
 
