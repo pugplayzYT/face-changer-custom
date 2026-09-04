@@ -43,3 +43,7 @@ See [`app/src/main/assets/SCRIPTING.md`](app/src/main/assets/SCRIPTING.md). The 
 ## Camera and memory architecture
 
 The visible camera uses CameraX `PreviewView`, independent from MediaPipe inference. Analysis uses `KEEP_ONLY_LATEST`, so stale frames are discarded rather than queued. Preview and analysis are bound in one `UseCaseGroup` with the preview's `ViewPort`, and the analyzer crops each frame to the exact CameraX `cropRect` before rotation/mirroring and MediaPipe inference. Every temporary MediaPipe `MPImage` is explicitly closed after inference and bitmap ownership is bounded so camera processing cannot accumulate an unbounded frame queue.
+
+## Front-camera exposure
+
+Camera capture prefers an advertised adaptive FPS range with a minimum of 15 FPS or lower (for example, 15–60 or 15–30), allowing auto-exposure to use longer exposures indoors. It no longer prefers fixed 60 FPS, which could make the front preview dark and noisy. If no suitable adaptive range is advertised, CameraX retains its device defaults. The performance badge shows an engine ceiling (up to 15/30/60 FPS), not a measured camera frame rate; actual capture and tracking rates depend on lighting, hardware and workload.

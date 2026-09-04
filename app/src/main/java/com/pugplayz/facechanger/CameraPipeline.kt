@@ -36,7 +36,6 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
-import kotlin.math.abs
 
 /**
  * Native CameraX preview plus a separately analyzed effect layer.
@@ -341,10 +340,8 @@ fun FilterCameraView(
                     preview,
                     localAnalysis
                 )
-                // CameraX 1.4 does not expose setTargetFrameRate on Preview/ImageAnalysis builders.
-                // Ask Camera2 for the best advertised range that can reach 60 instead. If the camera
-                // cannot advertise 60, it falls back to its highest supported range while MAX stays
-                // a 60-FPS engine target.
+                // Keep auto-exposure free to lower capture FPS in dim light. The engine's
+                // 60-FPS ceiling must not force the sensor into fixed 60-FPS exposure.
                 requestBestSourceFps(camera, 60)
                 clearError()
             } catch (t: Throwable) {
@@ -376,7 +373,7 @@ fun FilterCameraView(
 }
 
 private fun performanceText(level: FilterPerformance): String =
-    "${level.label} • ${level.targetFps} FPS"
+    "${level.label} • up to ${level.targetFps} FPS"
 
 /** Ask Camera2 for a real advertised source range rather than inventing an unsupported FPS range. */
 private fun requestBestSourceFps(camera: Camera, desiredFps: Int) {
@@ -387,25 +384,20 @@ private fun requestBestSourceFps(camera: Camera, desiredFps: Int) {
         )?.toList().orEmpty()
         if (supported.isEmpty()) return
 
-        val chosen: Range<Int> = supported
-            .filter { it.upper >= desiredFps }
-            .minWithOrNull(
-                compareBy<Range<Int>>(
-                    { abs(it.upper - desiredFps) },
-                    { abs(it.lower - desiredFps) },
-                    { it.upper - it.lower }
-                )
-            )
-            ?: supported.maxWithOrNull(
-                compareBy<Range<Int>>({ it.upper }, { it.lower })
-            )
-            ?: return
+        val selected = chooseExposureFriendlyFps(
+            supported.map { SourceFpsRange(it.lower, it.upper) }, desiredFps
+        ) ?: return // Leave CameraX's device defaults when no suitable adaptive range exists.
+        val chosen = Range(selected.lower, selected.upper)
 
         val options = CaptureRequestOptions.Builder()
             .setCaptureRequestOption(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, chosen)
             .build()
-        Camera2CameraControl.from(camera.cameraControl).setCaptureRequestOptions(options)
-        Log.i(TAG, "Camera source FPS request: $chosen (engine target $desiredFps FPS)")
+        val request = Camera2CameraControl.from(camera.cameraControl).setCaptureRequestOptions(options)
+        request.addListener({
+            runCatching { request.get() }
+                .onSuccess { Log.i(TAG, "Adaptive camera FPS: $chosen (engine ceiling $desiredFps FPS)") }
+                .onFailure { Log.w(TAG, "Camera rejected adaptive FPS request", it) }
+        }, java.util.concurrent.Executor { it.run() })
     }.onFailure { Log.w(TAG, "Could not request camera source FPS", it) }
 }
 
