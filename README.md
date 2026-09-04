@@ -1,21 +1,22 @@
 # Face Changer Custom
 
-An open-source Android MediaPipe camera-effect studio. It tracks **face, hands, or body**, exposes three landmark detail levels, and lets users build filter apps in a small sandboxed language that can draw on and modify live camera pixels.
+An open-source Android MediaPipe camera-effect studio. It tracks **face, hands, or body** and lets users build filter apps in a small sandboxed language that can draw on and modify live camera pixels.
 
 ## What is included
 
 - Front/back camera switching.
-- MediaPipe Face Landmarker, Hand Landmarker and Pose Landmarker.
+- MediaPipe Face Landmarker, Hand Landmarker and full Pose Landmarker.
 - A native CameraX preview that stays smooth while MediaPipe analysis runs separately.
-- Low / Medium / High detail for every tracking mode, with stable original MediaPipe landmark indices across LOD sampling.
+- **No Low / Medium / High quality switch.** Every tracking mode always exposes the complete MediaPipe landmark set.
+- CameraX Preview and ImageAnalysis share the same `ViewPort`; the analyzer applies the resulting `cropRect` before tracking, so scripted overlays line up with the visible camera instead of being slightly oversized or shifted.
 - Three built-in skeleton/mesh apps written in the same scripting language as custom filters. Their source is viewable in-app and can be saved as an editable copy.
-- Home screen with saved custom apps, delete controls, code editor, mode/detail controls and live app inputs.
+- Home screen with saved custom apps, delete controls, code editor, tracking-mode controls and live app inputs.
 - **No login or sign-in screen**; the app opens directly into Filter Studio.
 - Sandboxed pixel/drawing operations: magnify, pixelate, tint, dots, proper landmark connections, circles, lines, rectangles and text.
 - `let` variables, `if` / `else`, bounded `repeat` loops, numeric/text inputs and comparisons.
 - Scientific expressions and animation values/functions including `time`, `frame`, trig, powers, roots, logs, interpolation and direct landmark coordinate functions.
 - Formatted in-app scripting reference with **Copy Docs**. `app/src/main/assets/SCRIPTING.md` is the canonical source bundled into the app.
-- Dark graphite + mint/blue UI instead of the default purple Material look.
+- Explicit dark-theme content colors so text fields, dialogs, cards and controls remain readable instead of inheriting black-on-black colors.
 
 ## Build
 
@@ -41,4 +42,4 @@ See [`app/src/main/assets/SCRIPTING.md`](app/src/main/assets/SCRIPTING.md). The 
 
 ## Camera and memory architecture
 
-The visible camera uses CameraX `PreviewView`, independent from MediaPipe inference. LOW/MEDIUM/HIGH use progressively larger analysis frames while `KEEP_ONLY_LATEST` drops stale analysis frames. Every temporary MediaPipe `MPImage` is explicitly closed after inference and bitmap ownership is bounded so camera processing cannot accumulate an unbounded frame queue.
+The visible camera uses CameraX `PreviewView`, independent from MediaPipe inference. Analysis uses `KEEP_ONLY_LATEST`, so stale frames are discarded rather than queued. Preview and analysis are bound in one `UseCaseGroup` with the preview's `ViewPort`, and the analyzer crops each frame to the exact CameraX `cropRect` before rotation/mirroring and MediaPipe inference. Every temporary MediaPipe `MPImage` is explicitly closed after inference and bitmap ownership is bounded so camera processing cannot accumulate an unbounded frame queue.
