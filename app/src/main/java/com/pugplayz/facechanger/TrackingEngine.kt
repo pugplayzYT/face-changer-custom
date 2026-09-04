@@ -11,9 +11,9 @@ import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarker
 /**
  * MediaPipe wrapper kept on the camera worker thread.
  *
- * Tracking now always returns the complete landmark set. The old low/medium point sampling was
- * fundamentally wrong for programmable filters because valid MediaPipe indexes simply vanished.
- * Every MPImage is still closed in finally and detect/close remain synchronized for safe teardown.
+ * Tracking always returns the complete landmark set. MediaPipe gets its own bitmap copy because
+ * closing BitmapImageBuilder's MPImage can recycle the bitmap backing it. The camera pipeline still
+ * needs its original bitmap after tracking so the sandbox renderer can read the source pixels.
  */
 class TrackingEngine(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
@@ -23,7 +23,11 @@ class TrackingEngine(context: Context) : AutoCloseable {
 
     @Synchronized
     fun detect(bitmap: Bitmap, mode: TrackingMode): TrackingFrame {
-        val image = BitmapImageBuilder(bitmap).build()
+        // BitmapImageBuilder/MPImage owns the bitmap it wraps. If we wrap the camera bitmap itself,
+        // image.close() can recycle it and ScriptEngine.render() immediately fails at getPixels().
+        // Give MediaPipe a private copy so its lifetime can never invalidate the renderer's source.
+        val trackingBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, false)
+        val image = BitmapImageBuilder(trackingBitmap).build()
         try {
             val groups = when (mode) {
                 TrackingMode.FACE -> {
@@ -68,6 +72,9 @@ class TrackingEngine(context: Context) : AutoCloseable {
             return TrackingFrame(mode, groups, System.currentTimeMillis())
         } finally {
             runCatching { image.close() }
+            // Some MediaPipe implementations recycle the wrapped bitmap on close; some merely
+            // release their reference. Cover both cases without ever double-recycling it.
+            if (!trackingBitmap.isRecycled) trackingBitmap.recycle()
         }
     }
 
