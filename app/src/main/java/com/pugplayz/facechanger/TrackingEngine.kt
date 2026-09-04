@@ -9,14 +9,15 @@ import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarker
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
 import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarker
+import kotlin.math.max
 
 /**
  * MediaPipe wrapper kept on the camera worker thread.
  *
- * Tracking always returns the complete landmark set. MediaPipe gets its own bitmap copy because
- * closing BitmapImageBuilder's MPImage can recycle the bitmap backing it. VIDEO mode is used rather
- * than treating every camera frame as an unrelated still image; MediaPipe can then reuse temporal
- * tracking between frames instead of doing the full still-image path over and over.
+ * Tracking returns every landmark from the selected MediaPipe task. The detector does not need the
+ * full 640x480 overlay bitmap, though: MediaPipe's models resize internally anyway. Feeding a
+ * bounded 512px-long-edge copy cuts memory bandwidth and detector work while normalized landmark
+ * coordinates still map exactly back onto the full effect frame.
  */
 class TrackingEngine(context: Context) : AutoCloseable {
     private val appContext = context.applicationContext
@@ -27,10 +28,7 @@ class TrackingEngine(context: Context) : AutoCloseable {
 
     @Synchronized
     fun detect(bitmap: Bitmap, mode: TrackingMode): TrackingFrame {
-        // BitmapImageBuilder/MPImage owns the bitmap it wraps. If we wrap the camera bitmap itself,
-        // image.close() can recycle it and ScriptEngine.render() immediately fails at getPixels().
-        // Give MediaPipe a private copy so its lifetime can never invalidate the renderer's source.
-        val trackingBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, false)
+        val trackingBitmap = trackingCopy(bitmap)
         val image = BitmapImageBuilder(trackingBitmap).build()
         val timestampMs = nextTimestampMs()
         try {
@@ -80,10 +78,19 @@ class TrackingEngine(context: Context) : AutoCloseable {
             return TrackingFrame(mode, groups, timestampMs)
         } finally {
             runCatching { image.close() }
-            // Some MediaPipe implementations recycle the wrapped bitmap on close; some merely
-            // release their reference. Cover both cases without ever double-recycling it.
             if (!trackingBitmap.isRecycled) trackingBitmap.recycle()
         }
+    }
+
+    private fun trackingCopy(source: Bitmap): Bitmap {
+        val longest = max(source.width, source.height)
+        if (longest <= TRACKING_LONG_EDGE) {
+            return source.copy(Bitmap.Config.ARGB_8888, false)
+        }
+        val scale = TRACKING_LONG_EDGE.toDouble() / longest.toDouble()
+        val width = (source.width * scale).toInt().coerceAtLeast(1)
+        val height = (source.height * scale).toInt().coerceAtLeast(1)
+        return Bitmap.createScaledBitmap(source, width, height, true)
     }
 
     private fun nextTimestampMs(): Long {
@@ -105,5 +112,9 @@ class TrackingEngine(context: Context) : AutoCloseable {
         face = null
         hand = null
         pose = null
+    }
+
+    companion object {
+        private const val TRACKING_LONG_EDGE = 512
     }
 }
