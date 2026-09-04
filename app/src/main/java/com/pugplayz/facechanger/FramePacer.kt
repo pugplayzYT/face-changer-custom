@@ -5,16 +5,15 @@ import java.util.concurrent.atomic.AtomicReference
 
 /**
  * The user-facing performance setting is deliberately FPS-only.
- * It never changes landmark count, tracking model, script semantics, or analysis resolution.
+ * It never changes landmark count, tracking model, script semantics, smoothing, or resolution.
  */
 internal enum class FilterPerformance(
     val label: String,
-    val targetFps: Int,
-    val smoothingAlpha: Float
+    val targetFps: Int
 ) {
-    LOW("LOW", 15, 1.0f),
-    MEDIUM("MEDIUM", 30, 0.68f),
-    MAX("MAX", 60, 0.48f);
+    LOW("LOW", 15),
+    MEDIUM("MEDIUM", 30),
+    MAX("MAX", 60);
 
     fun next(): FilterPerformance = when (this) {
         LOW -> MEDIUM
