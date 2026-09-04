@@ -25,7 +25,7 @@ class TrackingEngine(private val context: Context) : AutoCloseable {
                         .build()
                 ).also { face = it }
                 detector.detect(image).faceLandmarks().map { list ->
-                    list.map { Point3(it.x(), it.y(), it.z()) }
+                    list.mapIndexed { index, p -> Point3(p.x(), p.y(), p.z(), index) }
                 }
             }
             TrackingMode.HAND -> {
@@ -37,7 +37,7 @@ class TrackingEngine(private val context: Context) : AutoCloseable {
                         .build()
                 ).also { hand = it }
                 detector.detect(image).landmarks().map { list ->
-                    list.map { Point3(it.x(), it.y(), it.z()) }
+                    list.mapIndexed { index, p -> Point3(p.x(), p.y(), p.z(), index) }
                 }
             }
             TrackingMode.BODY -> {
@@ -49,7 +49,7 @@ class TrackingEngine(private val context: Context) : AutoCloseable {
                         .build()
                 ).also { pose = it }
                 detector.detect(image).landmarks().map { list ->
-                    list.map { Point3(it.x(), it.y(), it.z()) }
+                    list.mapIndexed { index, p -> Point3(p.x(), p.y(), p.z(), index) }
                 }
             }
         }
@@ -57,8 +57,7 @@ class TrackingEngine(private val context: Context) : AutoCloseable {
     }
 
     private fun reduceDetail(points: List<Point3>, detail: DetailLevel): List<Point3> {
-        if (detail == DetailLevel.HIGH) return points
-        if (points.isEmpty()) return points
+        if (detail == DetailLevel.HIGH || points.isEmpty()) return points
         val target = when (detail) {
             DetailLevel.LOW -> when {
                 points.size > 100 -> 40

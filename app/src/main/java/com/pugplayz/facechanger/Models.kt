@@ -3,7 +3,14 @@ package com.pugplayz.facechanger
 enum class TrackingMode { FACE, HAND, BODY }
 enum class DetailLevel { LOW, MEDIUM, HIGH }
 
-data class Point3(val x: Float, val y: Float, val z: Float = 0f)
+data class Point3(
+    val x: Float,
+    val y: Float,
+    val z: Float = 0f,
+    /** Original MediaPipe landmark index. Kept stable even when LOD samples points. */
+    val index: Int = -1
+)
+
 data class TrackingFrame(
     val mode: TrackingMode,
     val groups: List<List<Point3>>,

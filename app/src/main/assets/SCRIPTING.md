@@ -1,87 +1,189 @@
 # Face Changer Custom scripting
 
-Every custom app is plain text interpreted by the app. Scripts have **no file, network, shell, Android API, reflection, process, or arbitrary Kotlin/Java access**. The host only exposes tracking data, user inputs, control flow and approved pixel/drawing operations.
+Every custom app is plain text interpreted by Face Changer Custom. The language is deliberately sandboxed: scripts have **no file, network, shell, Android API, process, reflection, arbitrary Kotlin/Java, or dynamic-code access**. They can only use the tracking data, controls, math, control flow, drawing operations and pixel effects documented here.
 
 ## Inputs
 
-Inputs appear as controls on the live filter screen and act like variables.
+Inputs become controls on the live filter screen and are variables inside the script.
 
-`input number strength Strength 1.8 0.5 3.0`
+`input number strength Eye_Size 1.8 0.5 3.0`
 
-`input text caption Caption hello`
+`input text caption Caption hello_world`
 
-Syntax: `input number|text NAME LABEL DEFAULT [MIN MAX]`. Use underscores in labels for spaces.
+Syntax: `input number|text NAME LABEL DEFAULT [MIN MAX]`. Use underscores for spaces in labels/default text.
 
-## Tracking modes and detail
+## Tracking mode and detail
 
-Each app chooses Face, Hand or Body plus Low, Medium or High detail in the editor. High exposes every MediaPipe landmark. Medium and Low expose progressively sampled landmark sets for cheaper effects.
+Each app chooses **Face**, **Hand**, or **Body**, plus **Low**, **Medium**, or **High** detail in the editor.
 
-Coordinates are normalized: x=0 is left, x=1 is right, y=0 is top, y=1 is bottom. `group 0` means the first detected face/hand/body. A second hand is usually `group 1`.
+- High exposes all MediaPipe landmarks.
+- Medium samples a useful subset.
+- Low exposes a smaller subset for lighter filters.
+- Every point keeps its original MediaPipe landmark index even at lower LOD. If a requested point was not included at that LOD, the operation simply has no point to act on.
 
-## Drawing / pixel commands
+Coordinates are normalized: x=0 is left, x=1 is right, y=0 is top, y=1 is bottom. `group 0` is the first detected face/hand/body; a second hand is usually `group 1`.
 
-`dots #47D7AC 4` draws a dot at every exposed landmark.
+## Variables and animation
 
-`skeleton #56A8FF 3` connects consecutive exposed landmarks. It is deliberately generic so built-in filters are written in the same language as user filters.
+Create numeric variables with `let`:
 
-`magnify GROUP POINT SCALE RADIUS` enlarges pixels around a tracked point. SCALE and RADIUS can be input-variable names. Example: `magnify 0 33 strength 0.10`.
+`let pulse = 1.3 + sin(time*4)*0.25`
 
-`pixelate BLOCK_SIZE` downsamples then nearest-neighbour upscales the whole camera frame.
+Built-in numeric values:
 
-`tint #RRGGBB AMOUNT` blends a color over the frame. AMOUNT is 0.0 to 1.0.
+- `time` — seconds since the filter engine started.
+- `frame` — processed-frame counter.
+- `tracked` — 1 when something is tracked, otherwise 0.
+- `groups` — number of tracked faces/hands/bodies.
+- `loop` — current zero-based iteration inside `repeat`.
+- `pi`, `e` — mathematical constants.
 
-## Control flow
+Because `time` and `frame` change continuously, scripts can animate effects without timers or threads.
 
-Conditionals:
+## Landmark functions
+
+Use original MediaPipe indexes:
+
+- `landmark_count(group)`
+- `landmark_x(group,index)`
+- `landmark_y(group,index)`
+- `landmark_z(group,index)`
+- `point_exists(group,index)` returns 1 or 0.
+
+Example:
+
+`let eyeX = landmark_x(0,33)`
+
+`let eyeY = landmark_y(0,33)`
+
+`circle eyeX eyeY 0.025 #47D7AC stroke`
+
+## Scientific math
+
+Expressions support parentheses plus `+ - * / % ^` and scientific notation.
+
+Functions: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sqrt`, `cbrt`, `abs`, `floor`, `ceil`, `round`, `sign`, `min`, `max`, `pow`, `ln`, `log10`, `exp`, `hypot`, `deg`, `rad`, `clamp`, `lerp`, `smoothstep`, `fract`, and deterministic animated `noise`.
+
+Examples:
+
+`let wobble = sin(time*6.28318)*0.08`
+
+`let distance = hypot(landmark_x(0,4)-0.5,landmark_y(0,4)-0.5)`
+
+## Skeleton drawing
+
+`dots #47D7AC 4`
+
+Draws every exposed landmark as a dot.
+
+`connections #56A8FF 3`
+
+Draws standard face-contour/eye/lip, hand-bone, or body-pose connections using original landmark indices. At lower LOD, an edge is drawn only when both endpoints are exposed.
+
+`skeleton #56A8FF 2`
+
+Draws a simple consecutive-point chain. This is useful for debugging custom sampled point sets; `connections` usually looks better for real skeletons.
+
+## Pixel effects
+
+`magnify GROUP POINT SCALE RADIUS`
+
+Copies pixels around a tracked point and enlarges/shrinks them. GROUP, POINT, SCALE and RADIUS are numeric expressions. Example:
+
+`magnify 0 33 strength 0.10`
+
+`pixelate BLOCK_SIZE`
+
+Downsamples then nearest-neighbour upscales the whole frame.
+
+`tint #RRGGBB AMOUNT`
+
+Blends a color over the frame. AMOUNT is clamped from 0.0 to 1.0.
+
+## Drawing primitives
+
+All x/y/w/h/radius coordinates are normalized to the camera frame.
+
+`circle X Y RADIUS #RRGGBB [stroke]`
+
+`line X1 Y1 X2 Y2 #RRGGBB [WIDTH_PIXELS]`
+
+`rect X Y W H #RRGGBB [stroke]`
+
+`text VALUE_OR_TEXT_VARIABLE X Y SIZE_PIXELS #RRGGBB`
+
+For literal text, use underscores for spaces: `text hello_world 0.05 0.10 34 #FFFFFF`.
+
+## If / else
 
 `if tracked`
 
-`  dots #47D7AC 5`
+`  connections #47D7AC 3`
 
 `else`
 
-`  tint #FF0000 0.1`
+`  tint #FF0000 0.10`
 
 `end`
 
-Comparisons are supported: `==`, `!=`, `>`, `<`, `>=`, `<=`. Either side can be a number, text literal, or input variable.
+Comparisons: `==`, `!=`, `>`, `<`, `>=`, `<=`. Numeric sides can be full expressions; equality also works with text-input variables.
 
-Loops:
+## Loops
 
-`repeat 4`
+`repeat 8`
 
-`  magnify 0 33 1.05 0.08`
+`  let radius = 0.01 + loop*0.004`
+
+`  circle 0.5 0.5 radius #47D7AC stroke`
 
 `end`
 
-Repeat counts are capped at 1000 per execution to keep scripts bounded.
+Repeat counts are hard-capped at 1000 per execution so a script cannot create an unbounded loop.
 
-## Example: giant eye-ish filter
-
-The exact face point index depends on the detail level. At High detail, point 33 is near one eye in the standard MediaPipe face mesh.
+## Example: animated giant eye
 
 `input number strength Eye_Size 1.8 0.7 3.0`
 
-`if tracked`
+`let pulse = strength + sin(time*5)*0.12`
 
-`  magnify 0 33 strength 0.11`
+`if point_exists(0,33) > 0`
 
-`  dots #47D7AC 2`
+`  magnify 0 33 pulse 0.11`
+
+`  circle landmark_x(0,33) landmark_y(0,33) 0.025 #47D7AC stroke`
 
 `end`
 
-## Example: chunky camera
+## Example: cyber hand
+
+`input number glow Glow 5 1 15`
+
+`connections #47D7AC glow`
+
+`dots #56A8FF 3`
+
+`if tracked`
+
+`  let wobble = sin(time*4)*0.02`
+
+`  circle landmark_x(0,8) landmark_y(0,8) 0.035+wobble #FFFFFF stroke`
+
+`end`
+
+## Example: chunky animated camera
 
 `input number blocks Block_Size 16 2 80`
 
 `pixelate blocks`
 
-`tint #47D7AC 0.08`
+`let pulse = 0.05 + (sin(time*3)+1)*0.03`
 
-## Safety and performance
+`tint #47D7AC pulse`
 
-The interpreter rejects unknown commands. It cannot call arbitrary functions. `repeat` is bounded, magnification scale/radius are clamped, and pixelation has a minimum block size. Camera analysis runs with KEEP_ONLY_LATEST so slow filters drop frames instead of building an ever-growing queue.
+## Sandbox / performance rules
+
+Unknown commands are rejected while saving. There is no arbitrary function dispatch. `repeat` is bounded, magnification radius/scale are clamped, and divide-by-zero math resolves safely. CameraX runs `KEEP_ONLY_LATEST`, so an expensive filter drops intermediate frames instead of building an ever-growing latency queue.
 
 ## Keeping docs current
 
-This file is the canonical scripting reference and is bundled directly into the APK. The in-app Docs page reads **this exact asset** and its Copy Docs button copies the same text, so editing this file updates both the repository docs and the in-app docs on the next build.
+This file is the **canonical scripting reference** and is bundled directly into the APK. The in-app Docs page reads this exact asset and its Copy Docs button copies the same text. Updating `app/src/main/assets/SCRIPTING.md` therefore updates the repository reference and the app reference together on the next build.
