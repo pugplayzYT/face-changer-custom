@@ -12,7 +12,7 @@ Performance is controlled **only by target FPS**. It does not remove landmarks, 
 - **MEDIUM — 30 FPS**
 - **MAX — 60 FPS**
 
-The camera pipeline requests a 60 FPS source. The frame pacer then accepts frames at the selected rate. Tap the FPS badge on the camera screen to cycle LOW → MEDIUM → MAX.
+The camera pipeline prefers an advertised adaptive range (for example 15–60 or 15–30 FPS), allowing longer exposures in dim light instead of forcing a dark, noisy fixed-60-FPS preview. If no suitable adaptive range exists, it keeps the camera defaults. The frame pacer accepts frames up to the selected rate. Tap the FPS badge on the camera screen to cycle LOW → MEDIUM → MAX.
 
 Tracking and filter rendering run on separate workers. MediaPipe keeps processing the newest available tracking frame while the renderer continues at the selected frame cadence. At MAX, tracking landmarks are interpolated between new MediaPipe results so overlays move smoothly instead of teleporting from one detection to the next.
 
