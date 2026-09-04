@@ -20,28 +20,28 @@ internal fun renderBundledTrackingOverlay(
     width: Int,
     height: Int
 ): Bitmap? {
-    val style = bundledStyle(code, mode) ?: return null
+    val overlayStyle = bundledStyle(code, mode) ?: return null
     val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
     val canvas = Canvas(bitmap)
 
     val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.rgb(
-            (style.lineR * 255f).toInt(),
-            (style.lineG * 255f).toInt(),
-            (style.lineB * 255f).toInt()
+            (overlayStyle.lineR * 255f).toInt(),
+            (overlayStyle.lineG * 255f).toInt(),
+            (overlayStyle.lineB * 255f).toInt()
         )
-        style = Paint.Style.STROKE
+        this.style = Paint.Style.STROKE
         strokeWidth = 1.6f
         strokeCap = Paint.Cap.ROUND
         strokeJoin = Paint.Join.ROUND
     }
     val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.rgb(
-            (style.dotR * 255f).toInt(),
-            (style.dotG * 255f).toInt(),
-            (style.dotB * 255f).toInt()
+            (overlayStyle.dotR * 255f).toInt(),
+            (overlayStyle.dotG * 255f).toInt(),
+            (overlayStyle.dotB * 255f).toInt()
         )
-        style = Paint.Style.FILL
+        this.style = Paint.Style.FILL
     }
 
     val edges = when (mode) {
@@ -55,16 +55,16 @@ internal fun renderBundledTrackingOverlay(
         TrackingMode.BODY -> 2.6f
     }
 
-    frame.groups.forEach { group ->
-        if (group.isEmpty()) return@forEach
+    frame.groups.forEach groupLoop@ { group ->
+        if (group.isEmpty()) return@groupLoop
         val byIndex = arrayOfNulls<Point3>((group.maxOfOrNull { it.index } ?: -1) + 1)
         group.forEach { point ->
             if (point.index in byIndex.indices) byIndex[point.index] = point
         }
 
-        edges.forEach { (aIndex, bIndex) ->
-            val a = byIndex.getOrNull(aIndex) ?: return@forEach
-            val b = byIndex.getOrNull(bIndex) ?: return@forEach
+        edges.forEach edgeLoop@ { (aIndex, bIndex) ->
+            val a = byIndex.getOrNull(aIndex) ?: return@edgeLoop
+            val b = byIndex.getOrNull(bIndex) ?: return@edgeLoop
             canvas.drawLine(
                 a.x * (width - 1),
                 a.y * (height - 1),
