@@ -22,7 +22,6 @@ import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
-import androidx.camera.core.UseCaseGroup
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.layout.fillMaxSize
@@ -42,9 +41,10 @@ import java.util.concurrent.atomic.AtomicReference
 /**
  * Native CameraX preview plus a separately analyzed effect layer.
  *
- * Preview and analysis share CameraX's viewport crop and fill the camera surface.
- * MediaPipe and script pixels use the same upright, optionally mirrored cropped bitmap.
- * A full-frame pixel block covers the whole visible preview, including its bottom edge.
+ * Preview and analysis both keep the complete 4:3 camera frame. FIT_CENTER avoids the huge side
+ * crop that FILL_CENTER causes on tall phones, which made the front camera look digitally zoomed.
+ * The effect bitmap uses the same fit policy, so a full-frame pixels block still reaches every
+ * camera pixel and lines up with the native preview without a second crop.
  *
  * Performance is FPS-only: LOW=15, MEDIUM=30 and MAX=60. The setting never changes model quality,
  * landmark count, smoothing, resolution or script semantics. Tracking runs on its own worker so a
@@ -70,15 +70,16 @@ fun FilterCameraView(
     val previewView = remember {
         PreviewView(context).apply {
             implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-            scaleType = PreviewView.ScaleType.FILL_CENTER
+            // Show the entire sensor frame. FILL_CENTER on a tall phone crops a large amount from
+            // the left/right of a portrait selfie frame and looks like an unwanted camera zoom.
+            scaleType = PreviewView.ScaleType.FIT_CENTER
         }
     }
     val effectView = remember {
         ImageView(context).apply {
-            // proxyToDisplayBitmap already applies CameraX's viewport crop. Stretching that cropped
-            // bitmap to this exact viewport avoids a second centre-crop and guarantees there is no
-            // one/two-pixel uncovered strip at the bottom on tall phone aspect ratios.
-            scaleType = ImageView.ScaleType.FIT_XY
+            // The analysis frame is also full 4:3. Use the same aspect-preserving fit as PreviewView
+            // so tracking/pixel coordinates overlay the visible camera image exactly.
+            scaleType = ImageView.ScaleType.FIT_CENTER
             setBackgroundColor(android.graphics.Color.TRANSPARENT)
         }
     }
@@ -356,14 +357,15 @@ fun FilterCameraView(
 
                 try {
                     cameraProvider.unbindAll()
+                    // Do not attach PreviewView's tall-screen viewport to the use cases. That viewport
+                    // intentionally crops the sensor to the phone screen and was the source of the
+                    // apparent front-camera zoom. Both use cases request 4:3, so FIT_CENTER keeps them
+                    // spatially aligned while preserving the complete camera field of view.
                     val camera = cameraProvider.bindToLifecycle(
                         lifecycle,
                         if (front) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA,
-                        UseCaseGroup.Builder()
-                            .setViewPort(requireNotNull(previewView.viewPort))
-                            .addUseCase(preview)
-                            .addUseCase(localAnalysis)
-                            .build()
+                        preview,
+                        localAnalysis
                     )
                     // Let auto-exposure slow the sensor in dim light. A fixed 60 FPS request limits
                     // exposure to roughly 1/60 s and can leave the front camera dark and noisy.
@@ -513,7 +515,7 @@ private fun throwableDetails(throwable: Throwable): String {
     else useful::class.java.simpleName.ifBlank { "Unknown error" }
 }
 
-/** Convert CameraX's buffer into exactly the upright image shown by the effect layer. */
+/** Convert CameraX's full analysis buffer into an upright image for the effect layer. */
 private fun proxyToDisplayBitmap(proxy: androidx.camera.core.ImageProxy, mirror: Boolean): Bitmap {
     val raw = proxy.toBitmap()
     val crop = proxy.cropRect
