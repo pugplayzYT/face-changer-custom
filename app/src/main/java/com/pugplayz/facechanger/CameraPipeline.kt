@@ -75,7 +75,10 @@ fun FilterCameraView(
     }
     val effectView = remember {
         ImageView(context).apply {
-            scaleType = ImageView.ScaleType.CENTER_CROP
+            // proxyToDisplayBitmap already applies CameraX's viewport crop. Stretching that cropped
+            // bitmap to this exact viewport avoids a second centre-crop and guarantees there is no
+            // one/two-pixel uncovered strip at the bottom on tall phone aspect ratios.
+            scaleType = ImageView.ScaleType.FIT_XY
             setBackgroundColor(android.graphics.Color.TRANSPARENT)
         }
     }
@@ -185,6 +188,10 @@ fun FilterCameraView(
         // String maps and expression ASTs for every single pixel. Unsupported scripts stay on the
         // compatibility interpreter automatically.
         val compiledPixelProgram = if (program.usesPixels) compilePixelBytecode(program) else null
+        // Large affine colour filters (invert/brightness/contrast style math) get an even faster
+        // native Skia path. It probes the exact VM result and only activates when it can prove the
+        // transform is affine, otherwise the bytecode VM remains the source of truth.
+        val fastAffinePixelOverlay = compileFastAffinePixelOverlay(code, program, compiledPixelProgram)
         val providerFuture = ProcessCameraProvider.getInstance(context)
 
         providerFuture.addListener({
@@ -293,13 +300,24 @@ fun FilterCameraView(
                             )
                         } else null
 
-                        val bytecodePixels = if (optimizedTrackedPixels == null && compiledPixelProgram != null) {
+                        // The old lookup-table optimisation still looped through every camera pixel
+                        // in Kotlin and then makeDifferenceOverlay walked the whole frame again.
+                        // Native ColorMatrix/Canvas removes both of those hot loops for affine math.
+                        val affineColorPixels = if (
+                            optimizedTrackedPixels == null && fastAffinePixelOverlay != null
+                        ) {
+                            fastAffinePixelOverlay.render(frameBitmap, tracking, latestValues.get())
+                        } else null
+
+                        val bytecodePixels = if (
+                            optimizedTrackedPixels == null && affineColorPixels == null && compiledPixelProgram != null
+                        ) {
                             compiledPixelProgram.render(frameBitmap, tracking, latestValues.get()).also {
                                 makeDifferenceOverlay(frameBitmap, it)
                             }
                         } else null
 
-                        output = bundledOverlay ?: optimizedTrackedPixels ?: bytecodePixels ?: if (program.usesPixels) {
+                        output = bundledOverlay ?: optimizedTrackedPixels ?: affineColorPixels ?: bytecodePixels ?: if (program.usesPixels) {
                             engine.render(frameBitmap, tracking, program, latestValues.get()).also {
                                 makeDifferenceOverlay(frameBitmap, it)
                             }
